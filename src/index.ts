@@ -15,7 +15,6 @@ async function bootstrap() {
   const pasteSimulator = new PasteSimulator();
   
   const clip = new ClipboardManager(deviceId, (content: string) => {
-    // Only send the payload if we have established a connection
     network.broadcast({
       type: 'CLIP_UPDATE',
       sourceId: deviceId,
@@ -43,19 +42,25 @@ async function bootstrap() {
         }
         break;
       case 'REMOTE_PASTE':
+      case 'REMOTE_TYPE':
         if (msg.sourceId !== deviceId && msg.payload !== undefined) {
           const preview = msg.payload.length > 60
             ? msg.payload.substring(0, 57) + '...'
             : msg.payload;
-          console.log(`\n[Remote Paste] Received from ${msg.sourceId}: "${preview}"`);
-
-          // Step 1: Write to local clipboard
-          await clip.apply(msg.payload);
-
-          // Step 2: Simulate Ctrl+V / Cmd+V at the focused window
-          await pasteSimulator.paste();
-
-          console.log('[Remote Paste] Pasted to active window.');
+            
+          if (msg.type === 'REMOTE_PASTE') {
+            console.log(`\n[Remote Paste] Received from ${msg.sourceId}: "${preview}"`);
+            await clip.apply(msg.payload);
+            await pasteSimulator.paste();
+            console.log('[Remote Paste] Pasted to active window via Ctrl+V.');
+          } else {
+            console.log(`\n[Remote Type] Received from ${msg.sourceId}: "${preview}"`);
+            // Still sync to clipboard just for consistency
+            await clip.apply(msg.payload);
+            // Simulate direct keystrokes to bypass Ctrl+V blocks
+            await pasteSimulator.typeText(msg.payload);
+            console.log('[Remote Type] Type-emulated directly to active window.');
+          }
         }
         break;
     }
@@ -71,7 +76,6 @@ async function bootstrap() {
   while (!connected) {
     const peer = await ui.selectPeer();
     if (connected) {
-      // In case we got connected while waiting for user input
       console.log("Already connected.");
       break;
     }
@@ -93,11 +97,9 @@ async function bootstrap() {
   }
 
   // ── Enter Remote Paste mode ──────────────────────────────────────
-  // Clipboard sync (CLIP_UPDATE) continues running in the background
-  // via the ClipboardManager polling interval.
-  ui.startRemotePasteInput((text: string) => {
+  ui.startRemotePasteInput((text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE') => {
     network.broadcast({
-      type: 'REMOTE_PASTE',
+      type: actionType,
       sourceId: deviceId,
       payload: text,
       timestamp: Date.now(),

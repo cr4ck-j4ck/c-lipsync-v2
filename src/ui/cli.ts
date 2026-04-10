@@ -10,7 +10,6 @@ export class UIManager {
     console.clear();
     console.log("Searching for devices on LAN...\n");
     
-    // Give discovery some time to populate
     await new Promise(r => setTimeout(r, 2000));
     
     const peers = this.discovery.getPeers();
@@ -37,15 +36,7 @@ export class UIManager {
     return selected;
   }
 
-  /**
-   * Starts a continuous readline input loop for remote paste mode.
-   * Each line typed by the user is passed to the `onSend` callback.
-   *
-   * Special commands:
-   *   .quit  — exit paste mode
-   *   .help  — show available commands
-   */
-  public startRemotePasteInput(onSend: (text: string) => void): void {
+  public startRemotePasteInput(onSend: (text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE') => void): void {
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -54,8 +45,7 @@ export class UIManager {
 
     console.log('\n────────────────────────────────────────────');
     console.log('  Remote Paste Mode');
-    console.log('  Type any string and press ENTER to send');
-    console.log('  Commands: .help | .quit');
+    console.log('  Commands: .help | .quit | .type <text>');
     console.log('────────────────────────────────────────────\n');
 
     rl.prompt();
@@ -76,19 +66,27 @@ export class UIManager {
 
       if (trimmed === '.help') {
         console.log('\nAvailable commands:');
-        console.log('  .quit   — exit remote paste mode');
-        console.log('  .help   — show this help message');
-        console.log('  <text>  — send text to remote device and trigger paste\n');
+        console.log('  .quit         — exit remote paste mode');
+        console.log('  .help         — show this help message');
+        console.log('  .type <text>  — explicitly emulate typing instead of Ctrl+V (Bypasses blocks in games/remote-desktops)');
+        console.log('  <text>        — default: copy string to clipboard and trigger Ctrl+V on remote device\n');
         rl.prompt();
         return;
       }
 
-      // Send the full original line (preserve spaces, only trim was for command detection)
-      onSend(line);
+      if (trimmed.startsWith('.type ')) {
+        const payload = line.substring(6); // Remove `.type ` but keep spaces after
+        onSend(payload, 'REMOTE_TYPE');
+        const preview = payload.length > 60 ? payload.substring(0, 57) + '...' : payload;
+        console.log(`  → Sent (as keystrokes): "${preview}"`);
+        rl.prompt();
+        return;
+      }
 
-      // Truncate preview for display
+      // Default: send as REMOTE_PASTE
+      onSend(line, 'REMOTE_PASTE');
       const preview = line.length > 60 ? line.substring(0, 57) + '...' : line;
-      console.log(`  → Sent: "${preview}"`);
+      console.log(`  → Sent (via Ctrl+V): "${preview}"`);
 
       rl.prompt();
     });
@@ -97,7 +95,6 @@ export class UIManager {
       console.log('\n[Paste mode ended]');
     });
 
-    // Handle SIGINT gracefully — don't kill the process, just exit paste mode
     rl.on('SIGINT', () => {
       console.log('\nInterrupted — exiting paste mode.');
       rl.close();
