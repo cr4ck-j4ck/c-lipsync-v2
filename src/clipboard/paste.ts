@@ -3,7 +3,7 @@ import os from 'os';
 
 /**
  * Simulates an OS-level paste (Ctrl+V / Cmd+V) at the currently focused window.
- * Now also supports raw keystroke typing to bypass Ctrl+V blocks.
+ * Now also supports raw keystroke typing with human-emulated delays.
  */
 export class PasteSimulator {
   private readonly platform: NodeJS.Platform;
@@ -42,10 +42,10 @@ export class PasteSimulator {
   private simulateTyping(text: string): Promise<void> {
     return new Promise((resolve, reject) => {
       if (this.platform === 'linux') {
-        execFile('wtype', [text], { timeout: 10000 }, (err) => {
+        execFile('wtype', ['-d', '25', text], { timeout: 30000 }, (err) => {
           if (!err) return resolve();
           
-          execFile('xdotool', ['type', '--clearmodifiers', text], { timeout: 10000 }, (err2) => {
+          execFile('xdotool', ['type', '--delay', '25', '--clearmodifiers', text], { timeout: 30000 }, (err2) => {
             if (!err2) return resolve();
             reject(new Error(`Linux typing simulation requires either 'wtype' (Wayland) or 'xdotool' (X11).`));
           });
@@ -55,35 +55,58 @@ export class PasteSimulator {
 
       if (this.platform === 'darwin') {
         const escaped = text.replace(/"/g, '\\"');
-        execFile(
-          'osascript', 
-          ['-e', `tell application "System Events" to keystroke "${escaped}"`], 
-          { timeout: 10000 }, 
-          (error, _stdout, stderr) => {
+        const script = `
+          tell application "System Events"
+            set theText to "${escaped}"
+            repeat with i from 1 to count characters of theText
+              keystroke (character i of theText)
+              delay 0.02
+            end repeat
+          end tell
+        `;
+        execFile('osascript', ['-e', script], { timeout: 60000 }, (error, _stdout, stderr) => {
             if (error) reject(new Error(`osascript failed: ${stderr.trim()}`));
             else resolve();
-          }
-        );
+        });
         return;
       }
 
       if (this.platform === 'win32') {
         // Powershell SendKeys syntax requires escaping these characters: + ^ % ~ ( ) [ ] { }
-        // The escape mechanism is wrapping the character in curly braces: {+}
         const escaped = text.replace(/([+^%~()[\]{}])/g, '{$1}');
-        
-        // Single quotes also need to be doubled for powershell literal strings
         const psString = escaped.replace(/'/g, "''");
+        
+        // This PowerShell script types each character one by one with a 20ms human-like delay, 
+        // completely bypassing bot-detection speed limits.
+        const psCommand = `
+          Add-Type -AssemblyName System.Windows.Forms;
+          Start-Sleep -Milliseconds 200;
+          $text = '${psString}';
+          
+          # Iterate over each block of character vs {} escaped string
+          $i = 0;
+          while ($i -lt $text.Length) {
+              if ($text[$i] -eq '{' -and $i+2 -lt $text.Length -and $text[$i+2] -eq '}') {
+                 [System.Windows.Forms.SendKeys]::SendWait($text.Substring($i, 3));
+                 $i += 3;
+              } else {
+                 [System.Windows.Forms.SendKeys]::SendWait($text[$i]);
+                 $i++;
+              }
+              Start-Sleep -Milliseconds 20;
+          }
+        `;
         
         execFile(
           'powershell',
           [
+            '-WindowStyle', 'Hidden', // Prevent powershell from stealing focus
             '-NoProfile',
             '-NonInteractive',
             '-Command',
-            `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${psString}')`
+            psCommand
           ],
-          { timeout: 30000 },
+          { timeout: 60000 },
           (error, _stdout, stderr) => {
             if (error) reject(new Error(`powershell failed: ${stderr.trim()}`));
             else resolve();
@@ -124,10 +147,11 @@ export class PasteSimulator {
       } else if (this.platform === 'win32') {
         command = 'powershell';
         args = [
+          '-WindowStyle', 'Hidden',
           '-NoProfile',
           '-NonInteractive',
           '-Command',
-          'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^v")',
+          'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^v")'
         ];
       } else {
          return reject(new Error(`Unsupported platform: ${this.platform}`));
