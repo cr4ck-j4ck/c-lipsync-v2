@@ -6,7 +6,7 @@ export interface Peer {
   lastSeen: number;
 }
 
-export type MessageType = 'HELLO' | 'ACK' | 'CLIP_UPDATE' | 'REMOTE_PASTE' | 'REMOTE_TYPE';
+export type MessageType = 'HELLO' | 'ACK' | 'CLIP_UPDATE' | 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SCREENSHOT_REQ' | 'REMOTE_SCREENSHOT_RES';
 
 export interface NetworkMessage {
   type: MessageType;

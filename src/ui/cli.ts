@@ -36,7 +36,7 @@ export class UIManager {
     return selected;
   }
 
-  public startRemotePasteInput(onSend: (text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE') => void): void {
+  public startRemotePasteInput(onSend: (text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SCREENSHOT_REQ') => void): void {
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -44,8 +44,8 @@ export class UIManager {
     });
 
     console.log('\n────────────────────────────────────────────');
-    console.log('  Remote Paste Mode');
-    console.log('  Commands: .help | .quit | .type <text>');
+    console.log('  Remote Command Mode');
+    console.log('  Commands: .help | .quit | .screenshot | .type <text>');
     console.log('────────────────────────────────────────────\n');
 
     rl.prompt();
@@ -59,17 +59,25 @@ export class UIManager {
       }
 
       if (trimmed === '.quit') {
-        console.log('Exiting paste mode. Clipboard sync remains active.');
+        console.log('Exiting mode. Clipboard sync remains active.');
         rl.close();
         return;
       }
 
       if (trimmed === '.help') {
         console.log('\nAvailable commands:');
-        console.log('  .quit         — exit remote paste mode');
+        console.log('  .quit         — exit remote command mode');
         console.log('  .help         — show this help message');
+        console.log('  .screenshot   — command the remote device to take a desktop snapshot and copy it back to you');
         console.log('  .type <text>  — explicitly emulate typing instead of Ctrl+V (Bypasses blocks in games/remote-desktops)');
         console.log('  <text>        — default: copy string to clipboard and trigger Ctrl+V on remote device\n');
+        rl.prompt();
+        return;
+      }
+      
+      if (trimmed === '.screenshot') {
+        onSend('', 'REMOTE_SCREENSHOT_REQ');
+        console.log(`  → Requested Remote Screenshot... Waiting for response...`);
         rl.prompt();
         return;
       }
@@ -92,11 +100,11 @@ export class UIManager {
     });
 
     rl.on('close', () => {
-      console.log('\n[Paste mode ended]');
+      console.log('\n[Command mode ended]');
     });
 
     rl.on('SIGINT', () => {
-      console.log('\nInterrupted — exiting paste mode.');
+      console.log('\nInterrupted — exiting command mode.');
       rl.close();
     });
   }

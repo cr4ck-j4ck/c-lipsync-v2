@@ -4,6 +4,7 @@ import { DiscoveryManager } from './discovery/udp.js';
 import { NetworkManager } from './network/ws.js';
 import { ClipboardManager } from './clipboard/manager.js';
 import { PasteSimulator } from './clipboard/paste.js';
+import { ImageManager } from './clipboard/image.js';
 import { UIManager } from './ui/cli.js';
 
 async function bootstrap() {
@@ -13,6 +14,7 @@ async function bootstrap() {
   console.log(`Starting Local LAN Sync: ${deviceName} [${deviceId}]`);
   
   const pasteSimulator = new PasteSimulator();
+  const imageManager = new ImageManager();
   
   const clip = new ClipboardManager(deviceId, (content: string) => {
     network.broadcast({
@@ -55,11 +57,37 @@ async function bootstrap() {
             console.log('[Remote Paste] Pasted to active window via Ctrl+V.');
           } else {
             console.log(`\n[Remote Type] Received from ${msg.sourceId}: "${preview}"`);
-            // Still sync to clipboard just for consistency
             await clip.apply(msg.payload);
-            // Simulate direct keystrokes to bypass Ctrl+V blocks
             await pasteSimulator.typeText(msg.payload);
             console.log('[Remote Type] Type-emulated directly to active window.');
+          }
+        }
+        break;
+      case 'REMOTE_SCREENSHOT_REQ':
+        if (msg.sourceId !== deviceId) {
+          console.log(`\n[Screenshot] Remote device ${msg.sourceId} triggered a screenshot. Rendering...`);
+          const base64Img = await imageManager.captureScreen();
+          if (base64Img) {
+             network.broadcast({
+               type: 'REMOTE_SCREENSHOT_RES',
+               sourceId: deviceId,
+               payload: base64Img,
+               timestamp: Date.now()
+             });
+             console.log(`[Screenshot] Successfully snapped and sent ${(base64Img.length / 1024).toFixed(0)} KB back!`);
+          } else {
+             console.error(`[Screenshot] Failed to capture desktop. Output empty.`);
+          }
+        }
+        break;
+      case 'REMOTE_SCREENSHOT_RES':
+        if (msg.sourceId !== deviceId && msg.payload) {
+          console.log(`\n[Screenshot] Receiver matched! Incoming snapshot from ${msg.sourceId} (${(msg.payload.length / 1024).toFixed(0)} KB)`);
+          const success = await imageManager.writeClipboard(msg.payload);
+          if (success) {
+             console.log(`[Screenshot SUCCESS] 🎆 The remote image is now in your local clipboard! Paste it wherever you want.`);
+          } else {
+             console.error(`[Screenshot ERROR] Could not inject the incoming image into your system clipboard.`);
           }
         }
         break;
@@ -96,8 +124,7 @@ async function bootstrap() {
     }
   }
 
-  // ── Enter Remote Paste mode ──────────────────────────────────────
-  ui.startRemotePasteInput((text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE') => {
+  ui.startRemotePasteInput((text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SCREENSHOT_REQ') => {
     network.broadcast({
       type: actionType,
       sourceId: deviceId,
