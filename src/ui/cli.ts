@@ -4,7 +4,7 @@ import * as readline from 'readline';
 import { type Peer } from '../core/types.js';
 import { DiscoveryManager } from '../discovery/udp.js';
 
-type RemoteCommandType = 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SET_TEXT' | 'REMOTE_SCREENSHOT_REQ';
+type RemoteCommandType = 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SET_TEXT' | 'REMOTE_INSERT_TEXT' | 'REMOTE_SCREENSHOT_REQ';
 
 export class UIManager {
   constructor(private discovery: DiscoveryManager) {}
@@ -84,7 +84,7 @@ export class UIManager {
 
     console.log('\n────────────────────────────────────────────');
     console.log('  Remote Command Mode');
-    console.log('  Commands: .help | .quit | .screenshot | .type <text> | .set <text> | .setclip');
+    console.log('  Commands: .help | .quit | .screenshot | .type <text> | .set <text> | .insert <text> | .setclip | .insertclip');
     console.log('────────────────────────────────────────────\n');
 
     rl.prompt();
@@ -140,15 +140,24 @@ Available commands:
       Works in many normal apps, but some apps reject synthetic input.
 
   .set <text>
-      Set the focused text control through OS accessibility/UI Automation.
-      Best for target apps where .type is ignored.
+      Replace the whole focused text control through OS accessibility/UI Automation.
+
+  .insert <text>
+      Insert text at the focused control caret, or replace the selected text.
 
   .set
-      Start multiline focused-text mode. Paste/type formatted text,
+      Start multiline replace mode. Paste/type formatted text,
+      enter .end on its own line to send, or .cancel to abort.
+
+  .insert
+      Start multiline insert mode. Paste/type formatted text,
       enter .end on its own line to send, or .cancel to abort.
 
   .setclip
-      Send your local clipboard through .set. Best for formatted code,
+      Replace focused text with your local clipboard.
+
+  .insertclip
+      Insert your local clipboard at the caret. Best for formatted code,
       because it preserves newlines and indentation.
 
   .screenshot
@@ -182,7 +191,16 @@ More docs: docs/USAGE.md
         multilineMode = 'REMOTE_SET_TEXT';
         multilineLines = [];
         rl.setPrompt('set > ');
-        console.log('  → Multiline .set mode. Paste/type text now, then enter .end on its own line.');
+        console.log('  → Multiline .set replace mode. Paste/type text now, then enter .end on its own line.');
+        rl.prompt();
+        return;
+      }
+
+      if (trimmed === '.insert') {
+        multilineMode = 'REMOTE_INSERT_TEXT';
+        multilineLines = [];
+        rl.setPrompt('insert > ');
+        console.log('  → Multiline .insert mode. Paste/type text now, then enter .end on its own line.');
         rl.prompt();
         return;
       }
@@ -190,7 +208,15 @@ More docs: docs/USAGE.md
       if (trimmed.startsWith('.set ')) {
         const payload = line.substring(5); // Remove `.set ` but keep spaces after
         onSend(payload, 'REMOTE_SET_TEXT');
-        console.log(`  → Sent (as focused text value): "${this.preview(payload)}"`);
+        console.log(`  → Sent (replace focused text value): "${this.preview(payload)}"`);
+        rl.prompt();
+        return;
+      }
+
+      if (trimmed.startsWith('.insert ')) {
+        const payload = line.substring(8); // Remove `.insert ` but keep spaces after
+        onSend(payload, 'REMOTE_INSERT_TEXT');
+        console.log(`  → Sent (insert at caret): "${this.preview(payload)}"`);
         rl.prompt();
         return;
       }
@@ -199,7 +225,20 @@ More docs: docs/USAGE.md
         try {
           const payload = await clipboard.read();
           onSend(payload, 'REMOTE_SET_TEXT');
-          console.log(`  → Sent clipboard as focused text: "${this.preview(payload)}"`);
+          console.log(`  → Sent clipboard as focused replacement: "${this.preview(payload)}"`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`  → Failed to read local clipboard: ${message}`);
+        }
+        rl.prompt();
+        return;
+      }
+
+      if (trimmed === '.insertclip') {
+        try {
+          const payload = await clipboard.read();
+          onSend(payload, 'REMOTE_INSERT_TEXT');
+          console.log(`  → Sent clipboard for caret insert: "${this.preview(payload)}"`);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           console.error(`  → Failed to read local clipboard: ${message}`);

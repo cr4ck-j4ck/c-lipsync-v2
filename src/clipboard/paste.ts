@@ -61,6 +61,19 @@ export class PasteSimulator {
     }
   }
 
+  public async insertFocusedText(text: string): Promise<boolean> {
+    await this.sleep(150);
+
+    try {
+      await this.insertFocusedTextControl(text);
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`\n[PasteSimulator Error] Failed to insert focused text:\n  -> ${message}`);
+      return false;
+    }
+  }
+
   private simulateTyping(text: string): Promise<void> {
     if (this.platform === 'linux') {
       return this.tryCommands([
@@ -104,6 +117,14 @@ export class PasteSimulator {
     }
 
     return Promise.reject(new Error(`Focused text setting is currently implemented only on Windows UI Automation.`));
+  }
+
+  private insertFocusedTextControl(text: string): Promise<void> {
+    if (this.platform === 'win32') {
+      return this.runWindowsUIAutomationInsertText(text);
+    }
+
+    return Promise.reject(new Error(`Focused text insertion is currently implemented only on Windows UI Automation.`));
   }
 
   private simulateKeystroke(): Promise<void> {
@@ -295,6 +316,23 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
     });
   }
 
+  private runWindowsUIAutomationInsertText(text: string): Promise<void> {
+    return this.runCommand(
+      'powershell',
+      [
+        '-WindowStyle', 'Hidden',
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        this.encodePowerShellCommand(this.getWindowsUIAutomationInsertTextScript()),
+      ],
+      10000,
+      { CLIPSYNC_REMOTE_TEXT: text },
+    ).then(() => undefined).catch(result => {
+      throw new Error(`Windows UI Automation caret insert failed: ${result.stderr}`);
+    });
+  }
+
   private getWindowsSendInputScript(mode: 'TypeText' | 'Paste'): string {
     const invocation = mode === 'TypeText'
       ? `[NativeInput]::TypeText([Environment]::GetEnvironmentVariable("CLIPSYNC_REMOTE_TEXT", "Process"))`
@@ -480,6 +518,133 @@ for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
   if (Try-SetAutomationValue $current $text) {
     exit 0
   }
+  $current = $walker.GetParent($current)
+}
+
+throw "Focused element and nearby parents do not expose ValuePattern or LegacyIAccessiblePattern."
+    `;
+  }
+
+  private getWindowsUIAutomationInsertTextScript(): string {
+    return `
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+
+$insertText = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
+
+function Get-EditableValue($element) {
+  if ($null -eq $element) {
+    return $null
+  }
+
+  $pattern = $null
+  if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+    $valuePattern = [System.Windows.Automation.ValuePattern]$pattern
+    if ($valuePattern.Current.IsReadOnly) {
+      throw "Focused control exposes ValuePattern but is read-only."
+    }
+    return @{
+      Kind = "ValuePattern"
+      Pattern = $valuePattern
+      Value = [string]$valuePattern.Current.Value
+    }
+  }
+
+  $legacyPattern = $null
+  if ($element.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPattern)) {
+    $legacy = [System.Windows.Automation.LegacyIAccessiblePattern]$legacyPattern
+    return @{
+      Kind = "LegacyIAccessiblePattern"
+      Pattern = $legacy
+      Value = [string]$legacy.Current.Value
+    }
+  }
+
+  return $null
+}
+
+function Set-EditableValue($editable, $value) {
+  if ($editable.Kind -eq "ValuePattern") {
+    ([System.Windows.Automation.ValuePattern]$editable.Pattern).SetValue($value)
+    return
+  }
+
+  if ($editable.Kind -eq "LegacyIAccessiblePattern") {
+    ([System.Windows.Automation.LegacyIAccessiblePattern]$editable.Pattern).SetValue($value)
+    return
+  }
+
+  throw "Unsupported editable pattern."
+}
+
+function Get-SelectionOffsets($element) {
+  if ($null -eq $element) {
+    return $null
+  }
+
+  $pattern = $null
+  if (-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
+    return $null
+  }
+
+  $textPattern = [System.Windows.Automation.TextPattern]$pattern
+  $ranges = $textPattern.GetSelection()
+  if ($null -eq $ranges -or $ranges.Length -lt 1) {
+    return $null
+  }
+
+  $selection = $ranges[0]
+  $document = $textPattern.DocumentRange
+  $before = $document.Clone()
+  $null = $before.MoveEndpointByRange(
+    [System.Windows.Automation.TextPatternRangeEndpoint]::End,
+    $selection,
+    [System.Windows.Automation.TextPatternRangeEndpoint]::Start
+  )
+
+  $selectedText = $selection.GetText(-1)
+  $start = $before.GetText(-1).Length
+  $end = $start + $selectedText.Length
+
+  return @{
+    Start = $start
+    End = $end
+  }
+}
+
+$focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+if ($null -eq $focused) {
+  throw "No focused UI Automation element was found."
+}
+
+$current = $focused
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
+  $editable = Get-EditableValue $current
+  if ($null -ne $editable) {
+    $selection = Get-SelectionOffsets $current
+    if ($null -eq $selection -and $current -ne $focused) {
+      $selection = Get-SelectionOffsets $focused
+    }
+
+    if ($null -eq $selection) {
+      throw "Focused editable control does not expose TextPattern selection/caret information. Use .set/.setclip to replace the whole field, or .type if this app accepts keyboard injection."
+    }
+
+    $value = [string]$editable.Value
+    $start = [Math]::Max(0, [Math]::Min([int]$selection.Start, $value.Length))
+    $end = [Math]::Max(0, [Math]::Min([int]$selection.End, $value.Length))
+    if ($end -lt $start) {
+      $tmp = $start
+      $start = $end
+      $end = $tmp
+    }
+
+    $newValue = $value.Substring(0, $start) + $insertText + $value.Substring($end)
+    Set-EditableValue $editable $newValue
+    exit 0
+  }
+
   $current = $walker.GetParent($current)
 }
 

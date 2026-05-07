@@ -51,6 +51,7 @@ async function bootstrap() {
       case 'REMOTE_PASTE':
       case 'REMOTE_TYPE':
       case 'REMOTE_SET_TEXT':
+      case 'REMOTE_INSERT_TEXT':
         if (msg.sourceId !== deviceId && msg.payload !== undefined) {
           const preview = msg.payload.length > 60
             ? msg.payload.substring(0, 57) + '...'
@@ -75,13 +76,23 @@ async function bootstrap() {
               console.log('[Remote Type] Typing simulation failed. Check the error above on this receiver.');
             }
           } else {
-            console.log(`\n[Remote Set Text] Received from ${msg.sourceId}: "${preview}"`);
+            const label = msg.type === 'REMOTE_SET_TEXT' ? 'Remote Set Text' : 'Remote Insert Text';
+            console.log(`\n[${label}] Received from ${msg.sourceId}: "${preview}"`);
             await clip.apply(msg.payload);
-            const set = await pasteSimulator.setFocusedText(msg.payload);
-            if (set) {
-              console.log('[Remote Set Text] Focused text control updated through accessibility/UI Automation.');
+            if (msg.type === 'REMOTE_SET_TEXT') {
+              const set = await pasteSimulator.setFocusedText(msg.payload);
+              if (set) {
+                console.log('[Remote Set Text] Focused text control replaced through accessibility/UI Automation.');
+              } else {
+                console.log('[Remote Set Text] Focused text update failed. Check the error above on this receiver.');
+              }
             } else {
-              console.log('[Remote Set Text] Focused text update failed. Check the error above on this receiver.');
+              const inserted = await pasteSimulator.insertFocusedText(msg.payload);
+              if (inserted) {
+                console.log('[Remote Insert Text] Text inserted at focused control caret through accessibility/UI Automation.');
+              } else {
+                console.log('[Remote Insert Text] Focused text insert failed. Check the error above on this receiver.');
+              }
             }
           }
         }
@@ -154,7 +165,7 @@ async function bootstrap() {
     }
   }
 
-  ui.startRemotePasteInput((text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SET_TEXT' | 'REMOTE_SCREENSHOT_REQ') => {
+  ui.startRemotePasteInput((text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SET_TEXT' | 'REMOTE_INSERT_TEXT' | 'REMOTE_SCREENSHOT_REQ') => {
     network.broadcast({
       type: actionType,
       sourceId: deviceId,
@@ -208,16 +219,25 @@ Remote command mode:
       Some apps reject synthetic keyboard input.
 
   .set <text>
-      Sets the focused text control through Windows UI Automation.
-      Good when .type is blocked but the target exposes a real editable text control.
+      Replaces the whole focused text control through Windows UI Automation.
+
+  .insert <text>
+      Inserts text at the focused control caret, or replaces selected text.
 
   .set
-      Starts multiline set mode. Paste/type formatted code, then enter .end.
+      Starts multiline replace mode. Paste/type formatted code, then enter .end.
+      Use .cancel to abort.
+
+  .insert
+      Starts multiline insert mode. Paste/type formatted code, then enter .end.
       Use .cancel to abort.
 
   .setclip
-      Reads the sender's local clipboard and sends it through .set.
-      Best choice for formatted code because it preserves newlines and indentation.
+      Replaces the focused text with the sender's local clipboard.
+
+  .insertclip
+      Inserts the sender's local clipboard at the caret.
+      Best choice for adding formatted code because it preserves newlines and indentation.
 
   .screenshot
       Requests a screenshot from the receiver and places it on the sender clipboard.
