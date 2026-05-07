@@ -529,6 +529,59 @@ throw "Focused element and nearby parents do not expose ValuePattern or LegacyIA
     return `
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName WindowsBase
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public struct NativePoint {
+  public int X;
+  public int Y;
+}
+
+public static class NativeCaret {
+  [StructLayout(LayoutKind.Sequential)]
+  struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct GUITHREADINFO {
+    public int cbSize;
+    public int flags;
+    public IntPtr hwndActive;
+    public IntPtr hwndFocus;
+    public IntPtr hwndCapture;
+    public IntPtr hwndMenuOwner;
+    public IntPtr hwndMoveSize;
+    public IntPtr hwndCaret;
+    public RECT rcCaret;
+  }
+
+  [DllImport("user32.dll")]
+  static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO info);
+
+  [DllImport("user32.dll")]
+  static extern bool ClientToScreen(IntPtr hWnd, ref NativePoint point);
+
+  public static bool TryGetCaretPoint(out NativePoint point) {
+    point = new NativePoint();
+    GUITHREADINFO info = new GUITHREADINFO();
+    info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+
+    if (!GetGUIThreadInfo(0, ref info) || info.hwndCaret == IntPtr.Zero) {
+      return false;
+    }
+
+    point.X = info.rcCaret.Left;
+    point.Y = info.rcCaret.Top + Math.Max(0, (info.rcCaret.Bottom - info.rcCaret.Top) / 2);
+    return ClientToScreen(info.hwndCaret, ref point);
+  }
+}
+'@
 
 $insertText = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
 
@@ -577,7 +630,43 @@ function Set-EditableValue($editable, $value) {
   throw "Unsupported editable pattern."
 }
 
-function Get-SelectionOffsets($element) {
+function Get-OffsetsFromRange($textPattern, $range, $source) {
+  $document = $textPattern.DocumentRange
+  $before = $document.Clone()
+  $null = $before.MoveEndpointByRange(
+    [System.Windows.Automation.TextPatternRangeEndpoint]::End,
+    $range,
+    [System.Windows.Automation.TextPatternRangeEndpoint]::Start
+  )
+
+  $selectedText = $range.GetText(-1)
+  $start = $before.GetText(-1).Length
+  $end = $start + $selectedText.Length
+
+  return @{
+    Start = $start
+    End = $end
+    SelectedLength = $selectedText.Length
+    Source = $source
+  }
+}
+
+function Get-CaretOffsetsFromPoint($textPattern) {
+  $caretPoint = New-Object NativePoint
+  if (-not [NativeCaret]::TryGetCaretPoint([ref]$caretPoint)) {
+    return $null
+  }
+
+  try {
+    $screenPoint = New-Object System.Windows.Point([double]$caretPoint.X, [double]$caretPoint.Y)
+    $range = $textPattern.RangeFromPoint($screenPoint)
+    return Get-OffsetsFromRange $textPattern $range "SystemCaretPoint"
+  } catch {
+    return $null
+  }
+}
+
+function Get-SelectionOffsets($element, $valueLength) {
   if ($null -eq $element) {
     return $null
   }
@@ -588,28 +677,23 @@ function Get-SelectionOffsets($element) {
   }
 
   $textPattern = [System.Windows.Automation.TextPattern]$pattern
+
+  $caretOffsets = Get-CaretOffsetsFromPoint $textPattern
+  if ($null -ne $caretOffsets) {
+    return $caretOffsets
+  }
+
   $ranges = $textPattern.GetSelection()
   if ($null -eq $ranges -or $ranges.Length -lt 1) {
     return $null
   }
 
-  $selection = $ranges[0]
-  $document = $textPattern.DocumentRange
-  $before = $document.Clone()
-  $null = $before.MoveEndpointByRange(
-    [System.Windows.Automation.TextPatternRangeEndpoint]::End,
-    $selection,
-    [System.Windows.Automation.TextPatternRangeEndpoint]::Start
-  )
-
-  $selectedText = $selection.GetText(-1)
-  $start = $before.GetText(-1).Length
-  $end = $start + $selectedText.Length
-
-  return @{
-    Start = $start
-    End = $end
+  $offsets = Get-OffsetsFromRange $textPattern $ranges[0] "TextPatternSelection"
+  if ($offsets.Start -eq $valueLength -and $offsets.End -eq $valueLength -and $offsets.SelectedLength -eq 0 -and $valueLength -gt 0) {
+    throw "UI Automation reported the caret at the end, but the system caret position was not available. Refusing to append blindly."
   }
+
+  return $offsets
 }
 
 $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -622,16 +706,16 @@ $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
   $editable = Get-EditableValue $current
   if ($null -ne $editable) {
-    $selection = Get-SelectionOffsets $current
+    $value = [string]$editable.Value
+    $selection = Get-SelectionOffsets $current $value.Length
     if ($null -eq $selection -and $current -ne $focused) {
-      $selection = Get-SelectionOffsets $focused
+      $selection = Get-SelectionOffsets $focused $value.Length
     }
 
     if ($null -eq $selection) {
-      throw "Focused editable control does not expose TextPattern selection/caret information. Use .set/.setclip to replace the whole field, or .type if this app accepts keyboard injection."
+      throw "Focused editable control does not expose reliable caret information. Use .set/.setclip to replace the whole field, or .type if this app accepts keyboard injection."
     }
 
-    $value = [string]$editable.Value
     $start = [Math]::Max(0, [Math]::Min([int]$selection.Start, $value.Length))
     $end = [Math]::Max(0, [Math]::Min([int]$selection.End, $value.Length))
     if ($end -lt $start) {

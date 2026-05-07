@@ -1,6 +1,6 @@
 # C-Lipsync Usage Guide
 
-C-Lipsync connects two computers on the same WiFi/LAN, syncs clipboard text, and can send remote paste/type/set commands to the currently focused window on the receiver.
+C-Lipsync connects two computers on the same WiFi/LAN, syncs clipboard text, and can send remote paste/type/set/insert commands to the currently focused window on the receiver.
 
 ## Quick Start
 
@@ -20,34 +20,48 @@ After connection, focus the target input box on the receiving computer, then typ
 | --- | --- | --- |
 | `<text>` | Normal paste into regular apps | Only for one-line text |
 | `.type <text>` | Apps that accept synthetic keyboard events | Only for one-line text |
-| `.set <text>` | Apps where `.type` is ignored, but the input is accessible | Only for one-line text |
-| `.set` ... `.end` | Multiline text/code through UI Automation | Yes |
-| `.setclip` | Formatted code copied from your local clipboard | Yes |
+| `.set <text>` | Replace the whole focused accessible input | Only for one-line text |
+| `.insert <text>` | Insert at the caret in an accessible input | Only for one-line text |
+| `.set` ... `.end` | Replace whole input with multiline text/code | Yes |
+| `.insert` ... `.end` | Insert multiline text/code at the caret | Yes |
+| `.setclip` | Replace whole input with your local clipboard | Yes |
+| `.insertclip` | Insert your local clipboard at the caret | Yes |
 | `.screenshot` | Copy receiver screenshot back to sender clipboard | Not applicable |
 | `.quit` | Exit command mode | Not applicable |
 
 ## Recommended Ways To Paste Code
 
-### Best: `.setclip`
+### Best For Adding Code: `.insertclip`
 
-Use this when sending Python, JavaScript, or any code where indentation matters.
+Use this when sending Python, JavaScript, or any code where indentation matters and you want to insert at the current cursor position.
 
 1. Copy the formatted code on the sender computer.
 2. Focus the target input box on the receiver computer.
-3. Run:
+3. Put the cursor where you want the code inserted.
+4. Run:
+
+```text
+.insertclip
+```
+
+This reads the sender clipboard and inserts it into the focused text control on the receiver. Newlines, tabs, and spaces are preserved.
+
+### Replace Everything: `.setclip`
+
+Use this when you intentionally want to replace the entire focused input box.
 
 ```text
 .setclip
 ```
 
-This reads the sender clipboard and sets the focused text control on the receiver. Newlines, tabs, and spaces are preserved.
+This does not insert at the cursor. It replaces the whole field value.
 
-### Multiline Manual Mode
+### Multiline Manual Insert
 
-Use this when you want to type or paste directly into the terminal.
+Use `.insert` when you want to type or paste formatted text directly into the terminal and insert it at the receiver caret.
 
 ```text
-.set
+.insert
 import sys
 
 def main():
@@ -58,23 +72,17 @@ if __name__ == "__main__":
 .end
 ```
 
-Everything between `.set` and `.end` is sent as one multiline payload. Use `.cancel` to abort.
+Everything between `.insert` and `.end` is sent as one multiline payload. Use `.cancel` to abort.
 
-### One-Line `.set`
+### Multiline Manual Replace
 
-Use this only for short one-line text:
-
-```text
-.set hello world
-```
-
-There must be a space after `.set`. This is not valid:
+Use `.set` only when you want to replace the whole receiver field.
 
 ```text
-.sethello world
+.set
+full replacement text
+.end
 ```
-
-Without the space, the app treats it as normal paste text.
 
 ## What Each Input Method Does
 
@@ -107,7 +115,7 @@ Receiver behavior:
 
 This works in Notepad and many normal desktop apps. Some target apps reject it because it is software-generated input, not real HID keyboard input.
 
-### Focused Text Set: `.set <text>` / `.setclip`
+### Focused Text Replace: `.set <text>` / `.setclip`
 
 ```text
 .set hello world
@@ -121,25 +129,44 @@ On Windows, this uses UI Automation:
 3. Try `LegacyIAccessiblePattern.SetValue`.
 4. Walk a few parent controls and try again.
 
-This is why `.set` can work in apps where `.type` is ignored. It is not pretending to be a keyboard. It asks the OS accessibility layer to set the focused text control value.
+Because `SetValue` sets the whole value, `.set` and `.setclip` replace the full contents of the focused field.
 
-## Why `.type` Works In Notepad But Not Some Apps
+### Focused Text Insert: `.insert <text>` / `.insertclip`
 
-Notepad uses normal Windows edit controls and accepts software-generated keyboard events.
+```text
+.insert hello world
+.insertclip
+```
 
-Some apps do not. They may:
+On Windows, this also uses UI Automation, but it tries to preserve the current contents:
 
-- reject injected input;
-- read raw HID keyboard input only;
-- run with higher privileges than the Node process;
-- use a custom canvas/game/remote-desktop text field;
-- expose no normal editable accessibility control.
+1. Get the focused UI Automation element.
+2. Read the current value through `ValuePattern` or `LegacyIAccessiblePattern`.
+3. Read the real system caret location with `GetGUIThreadInfo`.
+4. Convert that caret point to a UI Automation text range with `TextPattern.RangeFromPoint`.
+5. Fall back to `TextPattern.GetSelection` only when the caret point is not available.
+6. Build `before + inserted text + after`.
+7. Set the rebuilt value back into the control.
 
-If `.type` fails but `.set` works, keep using `.setclip` for code.
-
-If both `.type` and `.set` fail, the app likely requires real HID-level input. That means a Bluetooth HID keyboard, USB HID device, ESP32 BLE keyboard, Raspberry Pi Pico/Zero USB HID, or a signed Windows virtual HID driver.
+Use `.insertclip` when you want paste-like behavior but `.type` or normal paste is blocked.
 
 ## Troubleshooting
+
+### `.setclip` Replaces Everything
+
+That is expected. `.setclip` means "set the whole focused value." Use `.insertclip` to insert at the cursor.
+
+### `.insertclip` Still Inserts At The End
+
+Pull the latest code and restart the Windows receiver. The updated `.insertclip` uses the actual system caret point first. If Windows cannot expose a real caret point and UI Automation only reports "end of field," the command now refuses to append blindly instead of silently putting text at the end.
+
+### `.insertclip` Cannot Find The Cursor
+
+Some controls expose a settable value but do not expose reliable caret information. In that case `.insertclip` cannot safely know where to insert. Use `.setclip` to replace the whole field, or `.type` if the app accepts keyboard injection.
+
+### `.set` Sends One Long Line
+
+Use `.insertclip`, `.setclip`, multiline `.insert`, or multiline `.set` mode. One-line `.set <text>` cannot preserve line breaks because the terminal input itself is one line.
 
 ### Device Discovery Is One-Way
 
@@ -151,14 +178,6 @@ If Linux can see Windows but Windows cannot see Linux, or the reverse:
 4. Enter that IP and port.
 
 On Windows, make sure the network is marked Private and firewall allows Node.js on private networks.
-
-### `.setclip` Sends Old Text
-
-Make sure you copied the formatted code on the sender computer before running `.setclip`.
-
-### `.set` Sends One Long Line
-
-Use `.setclip` or multiline `.set` mode. One-line `.set <text>` cannot preserve line breaks because the terminal input itself is one line.
 
 ### Target App Runs As Administrator
 
