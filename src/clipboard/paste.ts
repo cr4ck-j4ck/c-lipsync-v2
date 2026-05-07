@@ -17,11 +17,12 @@ export class PasteSimulator {
     this.platform = os.platform();
   }
 
-  public async paste(): Promise<void> {
+  public async paste(): Promise<boolean> {
     await this.sleep(150);
 
     try {
       await this.simulateKeystroke();
+      return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`\n[PasteSimulator Error] Failed to simulate paste:\n  -> ${message}`);
@@ -30,17 +31,20 @@ export class PasteSimulator {
       if (hint) {
         console.log(`\x1b[33m${hint}\x1b[0m`);
       }
+      return false;
     }
   }
 
-  public async typeText(text: string): Promise<void> {
+  public async typeText(text: string): Promise<boolean> {
     await this.sleep(150);
 
     try {
       await this.simulateTyping(text);
+      return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`\n[PasteSimulator Error] Failed to simulate typing:\n  -> ${message}`);
+      return false;
     }
   }
 
@@ -148,9 +152,14 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
     throw new Error(`${fallbackMessage} ${details}`);
   }
 
-  private runCommand(command: string, args: string[], timeout: number): Promise<CommandResult> {
+  private runCommand(
+    command: string,
+    args: string[],
+    timeout: number,
+    env?: NodeJS.ProcessEnv,
+  ): Promise<CommandResult> {
     return new Promise((resolve, reject) => {
-      execFile(command, args, { timeout }, (error, _stdout, stderr) => {
+      execFile(command, args, { timeout, env: env ? { ...process.env, ...env } : process.env }, (error, _stdout, stderr) => {
         const result = { command, stderr: stderr.trim() };
         if (error) {
           reject(result);
@@ -170,12 +179,12 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
         '-NonInteractive',
         '-Command',
         this.getWindowsSendInputScript('TypeText'),
-        text,
       ],
       60000,
-    ).then(() => undefined).catch(result => {
-      throw new Error(`Windows SendInput failed: ${result.stderr}`);
-    });
+      { CLIPSYNC_REMOTE_TEXT: text },
+    )
+      .then(() => undefined)
+      .catch(() => this.runWindowsSendKeysText(text));
   }
 
   private runWindowsSendInputPaste(): Promise<void> {
@@ -189,14 +198,71 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
         this.getWindowsSendInputScript('Paste'),
       ],
       5000,
+    )
+      .then(() => undefined)
+      .catch(() => this.runWindowsSendKeysPaste());
+  }
+
+  private runWindowsSendKeysText(text: string): Promise<void> {
+    // SendKeys syntax requires escaping these characters: + ^ % ~ ( ) [ ] { }
+    const escaped = text.replace(/([+^%~()[\]{}])/g, '{$1}');
+
+    const psCommand = `
+      Add-Type -AssemblyName System.Windows.Forms;
+      Start-Sleep -Milliseconds 150;
+      $text = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process');
+
+      $i = 0;
+      while ($i -lt $text.Length) {
+        if ($text[$i] -eq '{' -and $i+2 -lt $text.Length -and $text[$i+2] -eq '}') {
+          [System.Windows.Forms.SendKeys]::SendWait($text.Substring($i, 3));
+          $i += 3;
+        } else {
+          [System.Windows.Forms.SendKeys]::SendWait($text[$i]);
+          $i++;
+        }
+        Start-Sleep -Milliseconds 20;
+      }
+    `;
+
+    return this.runCommand(
+      'powershell',
+      [
+        '-WindowStyle', 'Hidden',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        psCommand,
+      ],
+      60000,
+      { CLIPSYNC_REMOTE_TEXT: escaped },
     ).then(() => undefined).catch(result => {
-      throw new Error(`Windows SendInput paste failed: ${result.stderr}`);
+      throw new Error(`Windows typing failed. SendInput and SendKeys both failed: ${result.stderr}`);
+    });
+  }
+
+  private runWindowsSendKeysPaste(): Promise<void> {
+    return this.runCommand(
+      'powershell',
+      [
+        '-WindowStyle', 'Hidden',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^v")'
+      ],
+      5000,
+    ).then(() => undefined).catch(result => {
+      throw new Error(`Windows paste failed. SendInput and SendKeys both failed: ${result.stderr}`);
     });
   }
 
   private getWindowsSendInputScript(mode: 'TypeText' | 'Paste'): string {
+    const invocation = mode === 'TypeText'
+      ? `[NativeInput]::TypeText([Environment]::GetEnvironmentVariable("CLIPSYNC_REMOTE_TEXT", "Process"))`
+      : '[NativeInput]::Paste()';
+
     return `
-param([string]$Text)
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -211,7 +277,19 @@ public static class NativeInput {
 
   [StructLayout(LayoutKind.Explicit)]
   struct InputUnion {
+    [FieldOffset(0)] public MOUSEINPUT mi;
     [FieldOffset(0)] public KEYBDINPUT ki;
+    [FieldOffset(0)] public HARDWAREINPUT hi;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct MOUSEINPUT {
+    public int dx;
+    public int dy;
+    public uint mouseData;
+    public uint dwFlags;
+    public uint time;
+    public UIntPtr dwExtraInfo;
   }
 
   [StructLayout(LayoutKind.Sequential)]
@@ -221,6 +299,13 @@ public static class NativeInput {
     public uint dwFlags;
     public uint time;
     public UIntPtr dwExtraInfo;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct HARDWAREINPUT {
+    public uint uMsg;
+    public ushort wParamL;
+    public ushort wParamH;
   }
 
   [DllImport("user32.dll", SetLastError = true)]
@@ -311,7 +396,7 @@ public static class NativeInput {
 }
 '@
 Start-Sleep -Milliseconds 150
-[NativeInput]::${mode}($Text)
+${invocation}
 `;
   }
 }

@@ -53,13 +53,21 @@ async function bootstrap() {
           if (msg.type === 'REMOTE_PASTE') {
             console.log(`\n[Remote Paste] Received from ${msg.sourceId}: "${preview}"`);
             await clip.apply(msg.payload);
-            await pasteSimulator.paste();
-            console.log('[Remote Paste] Pasted to active window via Ctrl+V.');
+            const pasted = await pasteSimulator.paste();
+            if (pasted) {
+              console.log('[Remote Paste] Pasted to active window via Ctrl+V.');
+            } else {
+              console.log('[Remote Paste] Paste simulation failed. Check the error above on this receiver.');
+            }
           } else {
             console.log(`\n[Remote Type] Received from ${msg.sourceId}: "${preview}"`);
             await clip.apply(msg.payload);
-            await pasteSimulator.typeText(msg.payload);
-            console.log('[Remote Type] Type-emulated directly to active window.');
+            const typed = await pasteSimulator.typeText(msg.payload);
+            if (typed) {
+              console.log('[Remote Type] Type-emulated directly to active window.');
+            } else {
+              console.log('[Remote Type] Typing simulation failed. Check the error above on this receiver.');
+            }
           }
         }
         break;
