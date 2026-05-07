@@ -16,10 +16,6 @@ export class DiscoveryManager {
     private wsPort: number
   ) {
     this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-
-    this.socket.on('error', (err) => {
-      console.error(`[Discovery] UDP error: ${err.message}`);
-    });
     
     // Bind to the port and allow broadcast and address reuse
     this.socket.on('listening', () => {
@@ -50,12 +46,42 @@ export class DiscoveryManager {
   }
 
   public start() {
-    this.socket.bind(DISCOVERY_PORT, '0.0.0.0', () => {
-      this.broadcastPresence();
-    });
+    this.socket.bind(DISCOVERY_PORT);
     
     this.broadcastInterval = setInterval(() => {
-      this.broadcastPresence();
+      const payload = JSON.stringify({
+        deviceId: this.deviceId,
+        deviceName: this.deviceName,
+        wsPort: this.wsPort
+      });
+      
+      // Determine local broadcast addresses based on network interfaces
+      const interfaces = os.networkInterfaces();
+      const broadcastAddresses = [];
+      
+      for (const name of Object.keys(interfaces)) {
+        for (const net of interfaces[name] || []) {
+          // Focus on IPv4 non-internal
+          if (net.family === 'IPv4' && !net.internal && net.netmask) {
+            const ipParts = net.address.split('.');
+            const maskParts = net.netmask.split('.');
+            const broadcastParts = ipParts.map((p, i) => {
+              return (~parseInt(maskParts[i] || '255') & 255) | parseInt(p);
+            });
+            broadcastAddresses.push(broadcastParts.join('.'));
+          }
+        }
+      }
+      
+      // Send broadcast
+      broadcastAddresses.push('255.255.255.255');
+      const uniqueBroadcasts = [...new Set(broadcastAddresses)];
+      
+      uniqueBroadcasts.forEach(addr => {
+        this.socket.send(payload, 0, payload.length, DISCOVERY_PORT, addr, (err) => {
+          // Silent catch for broadcast errors on unconnected interfaces
+        });
+      });
     }, BROADCAST_INTERVALMs);
   }
 
@@ -75,52 +101,5 @@ export class DiscoveryManager {
       clearInterval(this.broadcastInterval);
     }
     this.socket.close();
-  }
-
-  private broadcastPresence() {
-    const payload = JSON.stringify({
-      deviceId: this.deviceId,
-      deviceName: this.deviceName,
-      wsPort: this.wsPort
-    });
-    
-    const uniqueBroadcasts = [...new Set([
-      ...this.getBroadcastAddresses(),
-      '255.255.255.255',
-    ])];
-    
-    uniqueBroadcasts.forEach(addr => {
-      this.socket.send(payload, 0, payload.length, DISCOVERY_PORT, addr, (err) => {
-        const code = (err as NodeJS.ErrnoException | null)?.code;
-        if (err && code !== 'ENETUNREACH' && code !== 'EHOSTUNREACH') {
-          console.error(`[Discovery] Failed to broadcast to ${addr}: ${err.message}`);
-        }
-      });
-    });
-  }
-
-  private getBroadcastAddresses(): string[] {
-    const broadcastAddresses: string[] = [];
-    const interfaces = os.networkInterfaces();
-    
-    for (const name of Object.keys(interfaces)) {
-      for (const net of interfaces[name] || []) {
-        if (net.family === 'IPv4' && !net.internal && net.netmask) {
-          const ipParts = net.address.split('.').map(Number);
-          const maskParts = net.netmask.split('.').map(Number);
-          if (ipParts.length !== 4 || maskParts.length !== 4) {
-            continue;
-          }
-
-          const broadcastParts = ipParts.map((part, i) => {
-            const mask = maskParts[i] ?? 255;
-            return ((~mask & 255) | part).toString();
-          });
-          broadcastAddresses.push(broadcastParts.join('.'));
-        }
-      }
-    }
-
-    return broadcastAddresses;
   }
 }
