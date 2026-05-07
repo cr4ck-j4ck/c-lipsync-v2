@@ -561,6 +561,7 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public struct NativePoint {
   public int X;
@@ -569,60 +570,59 @@ public struct NativePoint {
 
 public static class NativeCaret {
   [StructLayout(LayoutKind.Sequential)]
-  struct RECT {
-    public int Left;
-    public int Top;
-    public int Right;
-    public int Bottom;
-  }
+  struct RECT { public int Left, Top, Right, Bottom; }
 
   [StructLayout(LayoutKind.Sequential)]
   struct GUITHREADINFO {
-    public int cbSize;
-    public int flags;
-    public IntPtr hwndActive;
-    public IntPtr hwndFocus;
-    public IntPtr hwndCapture;
-    public IntPtr hwndMenuOwner;
-    public IntPtr hwndMoveSize;
-    public IntPtr hwndCaret;
+    public int cbSize, flags;
+    public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
     public RECT rcCaret;
   }
 
-  [DllImport("user32.dll")]
-  static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO info);
+  const uint EM_GETSEL        = 0x00B0;
+  const uint WM_GETTEXTLENGTH = 0x000E;
+  const uint WM_GETTEXT       = 0x000D;
 
-  [DllImport("user32.dll")]
-  static extern bool ClientToScreen(IntPtr hWnd, ref NativePoint point);
+  [DllImport("user32.dll")] static extern bool    GetGUIThreadInfo(uint id, ref GUITHREADINFO i);
+  [DllImport("user32.dll")] static extern bool    ClientToScreen(IntPtr hWnd, ref NativePoint p);
+  [DllImport("user32.dll")] static extern uint    GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+  [DllImport("user32.dll")] static extern IntPtr  SendMessage(IntPtr hWnd, uint msg, IntPtr wP, IntPtr lP);
+  [DllImport("user32.dll")] static extern IntPtr  SendMessage(IntPtr hWnd, uint msg, IntPtr wP, StringBuilder lP);
 
-  [DllImport("user32.dll")]
-  static extern IntPtr GetForegroundWindow();
+  // Try EM_GETSEL to get caret offset — works for any Win32 EDIT or RichEdit control.
+  public static bool TryEmGetSel(IntPtr hwnd, out int selStart, out int selEnd) {
+    selStart = selEnd = -1;
+    if (hwnd == IntPtr.Zero) return false;
+    IntPtr r = SendMessage(hwnd, EM_GETSEL, IntPtr.Zero, IntPtr.Zero);
+    long v = r.ToInt64();
+    selStart = (int)(v & 0xFFFF);
+    selEnd   = (int)((v >> 16) & 0xFFFF);
+    return selStart >= 0 && selEnd >= selStart;
+  }
 
-  [DllImport("user32.dll")]
-  static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+  // Read control text via WM_GETTEXT — works for standard EDIT/RichEdit.
+  public static bool TryWmGetText(IntPtr hwnd, out string text) {
+    text = "";
+    if (hwnd == IntPtr.Zero) return false;
+    int len = (int)SendMessage(hwnd, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
+    if (len < 0) return false;
+    if (len == 0) return true;  // empty string is valid
+    var sb = new StringBuilder(len + 2);
+    SendMessage(hwnd, WM_GETTEXT, new IntPtr(len + 1), sb);
+    text = sb.ToString();
+    return true;
+  }
 
-  public static bool TryGetCaretPoint(out NativePoint point) {
+  // Try GetGUIThreadInfo using the element's own HWND thread (more accurate than foreground window).
+  public static bool TryGetCaretPoint(IntPtr elementHwnd, out NativePoint point) {
     point = new NativePoint();
-    
-    IntPtr fgHost = GetForegroundWindow();
-    if (fgHost == IntPtr.Zero) {
-      return false;
-    }
-
-    uint processId;
-    uint threadId = GetWindowThreadProcessId(fgHost, out processId);
-    if (threadId == 0) {
-      return false;
-    }
-
-    GUITHREADINFO info = new GUITHREADINFO();
+    if (elementHwnd == IntPtr.Zero) return false;
+    uint pid;
+    uint tid = GetWindowThreadProcessId(elementHwnd, out pid);
+    if (tid == 0) return false;
+    var info = new GUITHREADINFO();
     info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
-
-    if (!GetGUIThreadInfo(threadId, ref info) || info.hwndCaret == IntPtr.Zero) {
-      return false;
-    }
-
-    // Shift point slightly into the text to avoid boundary ArgumentExceptions
+    if (!GetGUIThreadInfo(tid, ref info) || info.hwndCaret == IntPtr.Zero) return false;
     point.X = info.rcCaret.Left + 1;
     point.Y = info.rcCaret.Top + Math.Max(0, (info.rcCaret.Bottom - info.rcCaret.Top) / 2);
     return ClientToScreen(info.hwndCaret, ref point);
@@ -632,136 +632,88 @@ public static class NativeCaret {
 
 $insertText = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
 
-function Get-EditableValue($element) {
-  if ($null -eq $element) { return $null }
-  $pattern = $null
-  if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
-    $vp = [System.Windows.Automation.ValuePattern]$pattern
-    if ($vp.Current.IsReadOnly) { throw "Focused control is read-only." }
-    return @{ Kind = "ValuePattern"; Pattern = $vp; Value = [string]$vp.Current.Value }
+$focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+if ($null -eq $focused) { throw "UIAutomation_End_Fallback" }
+
+$focusedHwnd = [System.IntPtr]::new([long]$focused.Current.NativeWindowHandle)
+
+# ── Strategy 1: EM_GETSEL + WM_GETTEXT (fastest, works for any Win32 EDIT/RichEdit) ──────────
+$emStart = -1; $emEnd = -1
+if ([NativeCaret]::TryEmGetSel($focusedHwnd, [ref]$emStart, [ref]$emEnd)) {
+  $windowText = ""
+  if ([NativeCaret]::TryWmGetText($focusedHwnd, [ref]$windowText)) {
+    $s = [Math]::Max(0, [Math]::Min($emStart, $windowText.Length))
+    $e = [Math]::Max(0, [Math]::Min($emEnd,   $windowText.Length))
+    if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
+    $newText = $windowText.Substring(0, $s) + $insertText + $windowText.Substring($e)
+
+    $vpat = $null
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $cur = $focused
+    for ($i = 0; $i -lt 6 -and $null -ne $cur; $i++) {
+      if ($cur.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vpat)) {
+        $vp = [System.Windows.Automation.ValuePattern]$vpat
+        if (-not $vp.Current.IsReadOnly) { $vp.SetValue($newText); exit 0 }
+      }
+      $cur = $walker.GetParent($cur)
+    }
   }
+}
+
+# ── Strategy 2: UIA TextPattern + ValuePattern (works for Electron, WPF, etc.) ──────────────
+function Get-OffsetsFromRange($tp, $range) {
+  $doc = $tp.DocumentRange; $before = $doc.Clone()
+  $null = $before.MoveEndpointByRange(
+    [System.Windows.Automation.TextPatternRangeEndpoint]::End, $range,
+    [System.Windows.Automation.TextPatternRangeEndpoint]::Start)
+  $sel = $range.GetText(-1)
+  return @{ Start = $before.GetText(-1).Length; End = ($before.GetText(-1).Length + $sel.Length) }
+}
+
+function Try-GetCaret($element, $valueLen) {
+  $tpat = $null
+  if (-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tpat)) { return $null }
+  $tp = [System.Windows.Automation.TextPattern]$tpat
+
+  $cp = New-Object NativePoint
+  if ([NativeCaret]::TryGetCaretPoint($focusedHwnd, [ref]$cp)) {
+    try {
+      $pt = New-Object System.Windows.Point([double]$cp.X, [double]$cp.Y)
+      return Get-OffsetsFromRange $tp ($tp.RangeFromPoint($pt))
+    } catch {}
+  }
+
+  try {
+    $ranges = $tp.GetSelection()
+    if ($ranges -and $ranges.Length -gt 0) {
+      $off = Get-OffsetsFromRange $tp $ranges[0]
+      if ($off.Start -eq $valueLen -and $off.End -eq $valueLen -and $valueLen -gt 0) { return $null }
+      return $off
+    }
+  } catch {}
   return $null
 }
 
-function Set-EditableValue($editable, $value) {
-  if ($editable.Kind -eq "ValuePattern") {
-    ([System.Windows.Automation.ValuePattern]$editable.Pattern).SetValue($value)
-    return
-  }
-
-  throw "Unsupported editable pattern."
-}
-
-function Get-OffsetsFromRange($textPattern, $range, $source) {
-  $document = $textPattern.DocumentRange
-  $before = $document.Clone()
-  $null = $before.MoveEndpointByRange(
-    [System.Windows.Automation.TextPatternRangeEndpoint]::End,
-    $range,
-    [System.Windows.Automation.TextPatternRangeEndpoint]::Start
-  )
-
-  $selectedText = $range.GetText(-1)
-  $start = $before.GetText(-1).Length
-  $end = $start + $selectedText.Length
-
-  return @{
-    Start = $start
-    End = $end
-    SelectedLength = $selectedText.Length
-    Source = $source
-  }
-}
-
-function Get-CaretOffsetsFromPoint($textPattern) {
-  $caretPoint = New-Object NativePoint
-  if (-not [NativeCaret]::TryGetCaretPoint([ref]$caretPoint)) {
-    return $null
-  }
-
-  try {
-    $screenPoint = New-Object System.Windows.Point([double]$caretPoint.X, [double]$caretPoint.Y)
-    $range = $textPattern.RangeFromPoint($screenPoint)
-    return Get-OffsetsFromRange $textPattern $range "SystemCaretPoint"
-  } catch {
-    return $null
-  }
-}
-
-function Get-SelectionOffsets($element, $valueLength) {
-  if ($null -eq $element) {
-    return $null
-  }
-
-  $pattern = $null
-  if (-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
-    return $null
-  }
-
-  $textPattern = [System.Windows.Automation.TextPattern]$pattern
-
-  $caretOffsets = Get-CaretOffsetsFromPoint $textPattern
-  if ($null -ne $caretOffsets) {
-    return $caretOffsets
-  }
-
-  $ranges = $null
-  try {
-    $ranges = $textPattern.GetSelection()
-  } catch {
-    return $null
-  }
-  if ($null -eq $ranges -or $ranges.Length -lt 1) {
-    return $null
-  }
-
-  $offsets = Get-OffsetsFromRange $textPattern $ranges[0] "TextPatternSelection"
-  
-  if ($offsets.Start -eq $valueLength -and $offsets.End -eq $valueLength -and $offsets.SelectedLength -eq 0 -and $valueLength -gt 0) {
-    throw "UIAutomation_End_Fallback"
-  }
-
-  return $offsets
-}
-
-$focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-if ($null -eq $focused) {
-  throw "No focused UI Automation element was found."
-}
-
-$current = $focused
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+$current = $focused
 for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
-  $editable = Get-EditableValue $current
-  if ($null -ne $editable) {
-    $value = [string]$editable.Value
-    
-    # TRUCIAL FIX: Check the FOCUSED child element for TextPattern first!
-    # The parent container often lazy-reports "End" when you query its TextPattern.
-    $selection = Get-SelectionOffsets $focused $value.Length
-    
-    # If the focused child doesn't have TextPattern, fallback to the parent wrapper
-    if ($null -eq $selection -and $current -ne $focused) {
-      $selection = Get-SelectionOffsets $current $value.Length
-    }
-
-    if ($null -eq $selection) {
+  $vpat2 = $null
+  if ($current.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vpat2)) {
+    $vp2 = [System.Windows.Automation.ValuePattern]$vpat2
+    if (-not $vp2.Current.IsReadOnly) {
+      $val = [string]$vp2.Current.Value
+      $off = Try-GetCaret $focused $val.Length
+      if ($null -eq $off -and $current -ne $focused) { $off = Try-GetCaret $current $val.Length }
+      if ($null -ne $off) {
+        $s = [Math]::Max(0, [Math]::Min([int]$off.Start, $val.Length))
+        $e = [Math]::Max(0, [Math]::Min([int]$off.End,   $val.Length))
+        if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
+        $vp2.SetValue($val.Substring(0, $s) + $insertText + $val.Substring($e))
+        exit 0
+      }
       throw "UIAutomation_End_Fallback"
     }
-
-    $start = [Math]::Max(0, [Math]::Min([int]$selection.Start, $value.Length))
-    $end = [Math]::Max(0, [Math]::Min([int]$selection.End, $value.Length))
-    if ($end -lt $start) {
-      $tmp = $start
-      $start = $end
-      $end = $tmp
-    }
-
-    $newValue = $value.Substring(0, $start) + $insertText + $value.Substring($end)
-    Set-EditableValue $editable $newValue
-    exit 0
   }
-
   $current = $walker.GetParent($current)
 }
 
