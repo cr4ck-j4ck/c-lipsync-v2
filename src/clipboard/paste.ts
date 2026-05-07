@@ -177,8 +177,8 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
         '-WindowStyle', 'Hidden',
         '-NoProfile',
         '-NonInteractive',
-        '-Command',
-        this.getWindowsSendInputScript('TypeText'),
+        '-EncodedCommand',
+        this.encodePowerShellCommand(this.getWindowsSendInputScript('TypeText')),
       ],
       60000,
       { CLIPSYNC_REMOTE_TEXT: text },
@@ -194,8 +194,8 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
         '-WindowStyle', 'Hidden',
         '-NoProfile',
         '-NonInteractive',
-        '-Command',
-        this.getWindowsSendInputScript('Paste'),
+        '-EncodedCommand',
+        this.encodePowerShellCommand(this.getWindowsSendInputScript('Paste')),
       ],
       5000,
     )
@@ -231,8 +231,8 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
         '-WindowStyle', 'Hidden',
         '-NoProfile',
         '-NonInteractive',
-        '-Command',
-        psCommand,
+        '-EncodedCommand',
+        this.encodePowerShellCommand(psCommand),
       ],
       60000,
       { CLIPSYNC_REMOTE_TEXT: escaped },
@@ -248,8 +248,8 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
         '-WindowStyle', 'Hidden',
         '-NoProfile',
         '-NonInteractive',
-        '-Command',
-        'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^v")'
+        '-EncodedCommand',
+        this.encodePowerShellCommand('Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^v")')
       ],
       5000,
     ).then(() => undefined).catch(result => {
@@ -397,6 +397,10 @@ public static class NativeInput {
 '@
 Start-Sleep -Milliseconds 150
 ${invocation}
-`;
+    `;
+  }
+
+  private encodePowerShellCommand(script: string): string {
+    return Buffer.from(script, 'utf16le').toString('base64');
   }
 }
