@@ -57,6 +57,20 @@ export class PasteSimulator {
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // If UIA couldn't find ValuePattern, fall back to clipboard + Ctrl+V
+      if (message.includes('UIA_VALUEPAT_NOTFOUND') || message.includes('UIAutomation_End_Fallback')) {
+        console.log(`[PasteSimulator] App does not expose ValuePattern via UIA. Falling back to native system Paste (Ctrl+V)...`);
+        try {
+          const oldClip = await clipboard.read().catch(() => '');
+          await clipboard.write(text);
+          await this.simulateKeystroke();
+          await this.sleep(100);
+          if (oldClip) await clipboard.write(oldClip);
+          return true;
+        } catch (pasteErr) {
+          console.error(`[PasteSimulator] Fallback paste failed:`, pasteErr);
+        }
+      }
       console.error(`\n[PasteSimulator Error] Failed to set focused text:\n  -> ${message}`);
       return false;
     }
@@ -514,44 +528,28 @@ Add-Type -AssemblyName UIAutomationTypes
 $text = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
 
 function Try-SetAutomationValue($element, $value) {
-  if ($null -eq $element) {
-    return $false
-  }
-
+  if ($null -eq $element) { return $false }
   $pattern = $null
   if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
-    $valuePattern = [System.Windows.Automation.ValuePattern]$pattern
-    if ($valuePattern.Current.IsReadOnly) {
-      throw "Focused control exposes ValuePattern but is read-only."
-    }
-    $valuePattern.SetValue($value)
+    $vp = [System.Windows.Automation.ValuePattern]$pattern
+    if ($vp.Current.IsReadOnly) { throw "Focused control is read-only." }
+    $vp.SetValue($value)
     return $true
   }
-
-  $legacyPattern = $null
-  if ($element.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPattern)) {
-    ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPattern).SetValue($value)
-    return $true
-  }
-
   return $false
 }
 
 $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-if ($null -eq $focused) {
-  throw "No focused UI Automation element was found."
-}
+if ($null -eq $focused) { throw "No focused UI Automation element found." }
 
 $current = $focused
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
-  if (Try-SetAutomationValue $current $text) {
-    exit 0
-  }
+  if (Try-SetAutomationValue $current $text) { exit 0 }
   $current = $walker.GetParent($current)
 }
 
-throw "Focused element and nearby parents do not expose ValuePattern or LegacyIAccessiblePattern."
+throw "UIA_VALUEPAT_NOTFOUND"
     `;
   }
 
@@ -635,44 +633,19 @@ public static class NativeCaret {
 $insertText = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
 
 function Get-EditableValue($element) {
-  if ($null -eq $element) {
-    return $null
-  }
-
+  if ($null -eq $element) { return $null }
   $pattern = $null
   if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
-    $valuePattern = [System.Windows.Automation.ValuePattern]$pattern
-    if ($valuePattern.Current.IsReadOnly) {
-      throw "Focused control exposes ValuePattern but is read-only."
-    }
-    return @{
-      Kind = "ValuePattern"
-      Pattern = $valuePattern
-      Value = [string]$valuePattern.Current.Value
-    }
+    $vp = [System.Windows.Automation.ValuePattern]$pattern
+    if ($vp.Current.IsReadOnly) { throw "Focused control is read-only." }
+    return @{ Kind = "ValuePattern"; Pattern = $vp; Value = [string]$vp.Current.Value }
   }
-
-  $legacyPattern = $null
-  if ($element.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPattern)) {
-    $legacy = [System.Windows.Automation.LegacyIAccessiblePattern]$legacyPattern
-    return @{
-      Kind = "LegacyIAccessiblePattern"
-      Pattern = $legacy
-      Value = [string]$legacy.Current.Value
-    }
-  }
-
   return $null
 }
 
 function Set-EditableValue($editable, $value) {
   if ($editable.Kind -eq "ValuePattern") {
     ([System.Windows.Automation.ValuePattern]$editable.Pattern).SetValue($value)
-    return
-  }
-
-  if ($editable.Kind -eq "LegacyIAccessiblePattern") {
-    ([System.Windows.Automation.LegacyIAccessiblePattern]$editable.Pattern).SetValue($value)
     return
   }
 
@@ -792,7 +765,7 @@ for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
   $current = $walker.GetParent($current)
 }
 
-throw "Focused element and nearby parents do not expose ValuePattern or LegacyIAccessiblePattern."
+throw "UIAutomation_End_Fallback"
     `;
   }
 

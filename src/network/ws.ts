@@ -14,7 +14,7 @@ export class NetworkManager {
 
   public init(): Promise<number> {
     return new Promise((resolve) => {
-      this.wss = new WebSocketServer({ port: 0 }, () => {
+      this.wss = new WebSocketServer({ host: '0.0.0.0', port: 0 }, () => {
         const address = this.wss.address();
         if (typeof address === 'object' && address !== null) {
           this.port = address.port;
