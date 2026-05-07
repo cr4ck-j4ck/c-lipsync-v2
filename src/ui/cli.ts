@@ -22,6 +22,10 @@ export class UIManager {
       name: `${peer.deviceName} (${peer.ip})`,
       value: peer
     }));
+    choices.push({
+      name: 'Manual connect by IP/port',
+      value: 'manual' as any
+    });
     choices.push({ name: 'Refresh list', value: null as any });
 
     const { selected } = await inquirer.prompt([
@@ -32,6 +36,36 @@ export class UIManager {
         choices
       }
     ]);
+
+    if (selected === 'manual') {
+      const manual = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'ip',
+          message: 'Remote device IP:',
+          validate: (value: string) => value.trim() ? true : 'Enter an IP address'
+        },
+        {
+          type: 'input',
+          name: 'port',
+          message: 'Remote WebSocket port:',
+          validate: (value: string) => {
+            const port = Number(value);
+            return Number.isInteger(port) && port > 0 && port <= 65535
+              ? true
+              : 'Enter a valid port number';
+          }
+        }
+      ]);
+
+      return {
+        deviceId: `manual-${manual.ip}:${manual.port}`,
+        deviceName: `Manual ${manual.ip}:${manual.port}`,
+        ip: manual.ip.trim(),
+        wsPort: Number(manual.port),
+        lastSeen: Date.now(),
+      };
+    }
 
     return selected;
   }

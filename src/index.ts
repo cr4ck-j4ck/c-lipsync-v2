@@ -95,6 +95,13 @@ async function bootstrap() {
   });
 
   const assignedPort = await network.init();
+  const localAddresses = getLocalIPv4Addresses();
+  console.log(`Listening for direct connections on port ${assignedPort}`);
+  if (localAddresses.length > 0) {
+    console.log(`Local IPs: ${localAddresses.join(', ')}`);
+  }
+  console.log('If discovery is one-way, choose "Manual connect by IP/port" on the other device.\n');
+
   const discovery = new DiscoveryManager(deviceId, deviceName, assignedPort);
   const ui = new UIManager(discovery);
   
@@ -135,3 +142,18 @@ async function bootstrap() {
 }
 
 bootstrap().catch(console.error);
+
+function getLocalIPv4Addresses(): string[] {
+  const addresses: string[] = [];
+  const interfaces = os.networkInterfaces();
+
+  for (const name of Object.keys(interfaces)) {
+    for (const net of interfaces[name] || []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        addresses.push(net.address);
+      }
+    }
+  }
+
+  return addresses;
+}

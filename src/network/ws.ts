@@ -14,7 +14,7 @@ export class NetworkManager {
 
   public init(): Promise<number> {
     return new Promise((resolve) => {
-      this.wss = new WebSocketServer({ port: 0 }, () => {
+      this.wss = new WebSocketServer({ host: '0.0.0.0', port: 0 }, () => {
         const address = this.wss.address();
         if (typeof address === 'object' && address !== null) {
           this.port = address.port;
@@ -43,7 +43,22 @@ export class NetworkManager {
 
   public connect(peer: Peer): Promise<boolean> {
     return new Promise((resolve) => {
+      let settled = false;
+      const finish = (success: boolean) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        resolve(success);
+      };
+
       const ws = new WebSocket(`ws://${peer.ip}:${peer.wsPort}`);
+      const timeout = setTimeout(() => {
+        console.error(`Timed out connecting to peer ${peer.deviceName} at ${peer.ip}:${peer.wsPort}`);
+        ws.close();
+        finish(false);
+      }, 5000);
       
       ws.on('open', () => {
         this.connections.add(ws);
@@ -55,7 +70,7 @@ export class NetworkManager {
           timestamp: Date.now()
         });
         
-        resolve(true);
+        finish(true);
       });
       
       ws.on('message', (data: Buffer) => {
@@ -67,7 +82,7 @@ export class NetworkManager {
       
       ws.on('error', (err) => {
         console.error(`Error connecting to peer ${peer.deviceName}: ${err.message}`);
-        resolve(false);
+        finish(false);
       });
       
       ws.on('close', () => {
