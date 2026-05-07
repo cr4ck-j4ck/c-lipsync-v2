@@ -48,6 +48,19 @@ export class PasteSimulator {
     }
   }
 
+  public async setFocusedText(text: string): Promise<boolean> {
+    await this.sleep(150);
+
+    try {
+      await this.setFocusedTextControl(text);
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`\n[PasteSimulator Error] Failed to set focused text:\n  -> ${message}`);
+      return false;
+    }
+  }
+
   private simulateTyping(text: string): Promise<void> {
     if (this.platform === 'linux') {
       return this.tryCommands([
@@ -83,6 +96,14 @@ export class PasteSimulator {
     }
 
     return Promise.reject(new Error(`Unsupported platform: ${this.platform}`));
+  }
+
+  private setFocusedTextControl(text: string): Promise<void> {
+    if (this.platform === 'win32') {
+      return this.runWindowsUIAutomationSetText(text);
+    }
+
+    return Promise.reject(new Error(`Focused text setting is currently implemented only on Windows UI Automation.`));
   }
 
   private simulateKeystroke(): Promise<void> {
@@ -257,6 +278,23 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
     });
   }
 
+  private runWindowsUIAutomationSetText(text: string): Promise<void> {
+    return this.runCommand(
+      'powershell',
+      [
+        '-WindowStyle', 'Hidden',
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        this.encodePowerShellCommand(this.getWindowsUIAutomationSetTextScript()),
+      ],
+      10000,
+      { CLIPSYNC_REMOTE_TEXT: text },
+    ).then(() => undefined).catch(result => {
+      throw new Error(`Windows UI Automation SetValue failed: ${result.stderr}`);
+    });
+  }
+
   private getWindowsSendInputScript(mode: 'TypeText' | 'Paste'): string {
     const invocation = mode === 'TypeText'
       ? `[NativeInput]::TypeText([Environment]::GetEnvironmentVariable("CLIPSYNC_REMOTE_TEXT", "Process"))`
@@ -397,6 +435,55 @@ public static class NativeInput {
 '@
 Start-Sleep -Milliseconds 150
 ${invocation}
+    `;
+  }
+
+  private getWindowsUIAutomationSetTextScript(): string {
+    return `
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+
+$text = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
+
+function Try-SetAutomationValue($element, $value) {
+  if ($null -eq $element) {
+    return $false
+  }
+
+  $pattern = $null
+  if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+    $valuePattern = [System.Windows.Automation.ValuePattern]$pattern
+    if ($valuePattern.Current.IsReadOnly) {
+      throw "Focused control exposes ValuePattern but is read-only."
+    }
+    $valuePattern.SetValue($value)
+    return $true
+  }
+
+  $legacyPattern = $null
+  if ($element.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPattern)) {
+    ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPattern).SetValue($value)
+    return $true
+  }
+
+  return $false
+}
+
+$focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+if ($null -eq $focused) {
+  throw "No focused UI Automation element was found."
+}
+
+$current = $focused
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
+  if (Try-SetAutomationValue $current $text) {
+    exit 0
+  }
+  $current = $walker.GetParent($current)
+}
+
+throw "Focused element and nearby parents do not expose ValuePattern or LegacyIAccessiblePattern."
     `;
   }
 

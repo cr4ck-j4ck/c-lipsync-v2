@@ -70,7 +70,7 @@ export class UIManager {
     return selected;
   }
 
-  public startRemotePasteInput(onSend: (text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SCREENSHOT_REQ') => void): void {
+  public startRemotePasteInput(onSend: (text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SET_TEXT' | 'REMOTE_SCREENSHOT_REQ') => void): void {
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -79,7 +79,7 @@ export class UIManager {
 
     console.log('\n────────────────────────────────────────────');
     console.log('  Remote Command Mode');
-    console.log('  Commands: .help | .quit | .screenshot | .type <text>');
+    console.log('  Commands: .help | .quit | .screenshot | .type <text> | .set <text>');
     console.log('────────────────────────────────────────────\n');
 
     rl.prompt();
@@ -104,6 +104,7 @@ export class UIManager {
         console.log('  .help         — show this help message');
         console.log('  .screenshot   — command the remote device to take a desktop snapshot and copy it back to you');
         console.log('  .type <text>  — type text using the strongest available keyboard backend instead of Ctrl+V');
+        console.log('  .set <text>   — set the focused text control through OS accessibility/UI Automation');
         console.log('  <text>        — default: copy string to clipboard and trigger Ctrl+V on remote device\n');
         rl.prompt();
         return;
@@ -121,6 +122,15 @@ export class UIManager {
         onSend(payload, 'REMOTE_TYPE');
         const preview = payload.length > 60 ? payload.substring(0, 57) + '...' : payload;
         console.log(`  → Sent (as keystrokes): "${preview}"`);
+        rl.prompt();
+        return;
+      }
+
+      if (trimmed.startsWith('.set ')) {
+        const payload = line.substring(5); // Remove `.set ` but keep spaces after
+        onSend(payload, 'REMOTE_SET_TEXT');
+        const preview = payload.length > 60 ? payload.substring(0, 57) + '...' : payload;
+        console.log(`  → Sent (as focused text value): "${preview}"`);
         rl.prompt();
         return;
       }

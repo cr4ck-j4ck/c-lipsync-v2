@@ -45,6 +45,7 @@ async function bootstrap() {
         break;
       case 'REMOTE_PASTE':
       case 'REMOTE_TYPE':
+      case 'REMOTE_SET_TEXT':
         if (msg.sourceId !== deviceId && msg.payload !== undefined) {
           const preview = msg.payload.length > 60
             ? msg.payload.substring(0, 57) + '...'
@@ -59,7 +60,7 @@ async function bootstrap() {
             } else {
               console.log('[Remote Paste] Paste simulation failed. Check the error above on this receiver.');
             }
-          } else {
+          } else if (msg.type === 'REMOTE_TYPE') {
             console.log(`\n[Remote Type] Received from ${msg.sourceId}: "${preview}"`);
             await clip.apply(msg.payload);
             const typed = await pasteSimulator.typeText(msg.payload);
@@ -67,6 +68,15 @@ async function bootstrap() {
               console.log('[Remote Type] Type-emulated directly to active window.');
             } else {
               console.log('[Remote Type] Typing simulation failed. Check the error above on this receiver.');
+            }
+          } else {
+            console.log(`\n[Remote Set Text] Received from ${msg.sourceId}: "${preview}"`);
+            await clip.apply(msg.payload);
+            const set = await pasteSimulator.setFocusedText(msg.payload);
+            if (set) {
+              console.log('[Remote Set Text] Focused text control updated through accessibility/UI Automation.');
+            } else {
+              console.log('[Remote Set Text] Focused text update failed. Check the error above on this receiver.');
             }
           }
         }
@@ -139,7 +149,7 @@ async function bootstrap() {
     }
   }
 
-  ui.startRemotePasteInput((text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SCREENSHOT_REQ') => {
+  ui.startRemotePasteInput((text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SET_TEXT' | 'REMOTE_SCREENSHOT_REQ') => {
     network.broadcast({
       type: actionType,
       sourceId: deviceId,
