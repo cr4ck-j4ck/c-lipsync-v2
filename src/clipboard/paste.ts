@@ -1,5 +1,6 @@
 import { execFile } from 'child_process';
 import os from 'os';
+import clipboard from 'clipboardy';
 
 type CommandResult = {
   command: string;
@@ -125,8 +126,27 @@ export class PasteSimulator {
         await this.runWindowsUIAutomationInsertText(text);
       } catch (err) {
         if (String(err).includes('UIAutomation_End_Fallback')) {
-          console.log(`[PasteSimulator] App does not expose Caret via UIA. Falling back to typing keystrokes...`);
-          await this.runWindowsSendInputText(text);
+          console.log(`[PasteSimulator] App does not expose Caret via UIA. Falling back to native system Paste (Ctrl+V)...`);
+          
+          try {
+            // Backup current clipboard
+            const oldClip = await clipboard.read().catch(() => '');
+            
+            // Set text to clipboard
+            await clipboard.write(text);
+            
+            // Simulate Ctrl+V to paste the text directly at the active cursor
+            await this.simulateKeystroke();
+            
+            // Optional: small delay, then restore
+            await this.sleep(100);
+            if (oldClip) {
+              await clipboard.write(oldClip);
+            }
+          } catch (pasteErr) {
+            console.error(`[PasteSimulator] Failed fallback paste execution:`, pasteErr);
+          }
+          
           return;
         }
         throw err;

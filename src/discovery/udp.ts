@@ -46,7 +46,7 @@ export class DiscoveryManager {
   }
 
   public start() {
-    this.socket.bind(DISCOVERY_PORT);
+    this.socket.bind(DISCOVERY_PORT, '0.0.0.0');
     
     this.broadcastInterval = setInterval(() => {
       const payload = JSON.stringify({
