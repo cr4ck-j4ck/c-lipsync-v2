@@ -711,12 +711,15 @@ for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
         $vp2.SetValue($val.Substring(0, $s) + $insertText + $val.Substring($e))
         exit 0
       }
-      throw "UIAutomation_End_Fallback"
+      # JUGAAD: caret unknown but ValuePattern works — append at end so content always lands in the field
+      $vp2.SetValue($val + $insertText)
+      exit 0
     }
   }
   $current = $walker.GetParent($current)
 }
 
+# JUGAAD fallback: no ValuePattern found anywhere — signal Node for Ctrl+V
 throw "UIAutomation_End_Fallback"
     `;
   }

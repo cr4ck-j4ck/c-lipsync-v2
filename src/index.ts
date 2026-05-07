@@ -89,7 +89,7 @@ async function bootstrap() {
             } else {
               const inserted = await pasteSimulator.insertFocusedText(msg.payload);
               if (inserted) {
-                console.log('[Remote Insert Text] Text inserted at focused control caret through accessibility/UI Automation.');
+                console.log('[Remote Insert Text] Text inserted/appended via UI Automation (jugaad: may be at caret or end if caret undetectable).');
               } else {
                 console.log('[Remote Insert Text] Focused text insert failed. Check the error above on this receiver.');
               }
