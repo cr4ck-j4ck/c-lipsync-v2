@@ -7,6 +7,11 @@ import { PasteSimulator } from './clipboard/paste.js';
 import { ImageManager } from './clipboard/image.js';
 import { UIManager } from './ui/cli.js';
 
+if (process.argv.includes('-h') || process.argv.includes('--help')) {
+  printHelp();
+  process.exit(0);
+}
+
 async function bootstrap() {
   const deviceId = uuidv4();
   const deviceName = os.hostname() + ' - ' + os.userInfo().username;
@@ -174,4 +179,56 @@ function getLocalIPv4Addresses(): string[] {
   }
 
   return addresses;
+}
+
+function printHelp() {
+  console.log(`
+C-Lipsync LAN clipboard and remote text helper
+
+Usage:
+  pnpm start
+  pnpm start -- -h
+  pnpm start -- --help
+
+Startup flow:
+  1. Run this app on both computers on the same WiFi/LAN.
+  2. Select the visible peer from the device list.
+  3. If discovery is one-way, use "Manual connect by IP/port" with the IP/port printed by the other device.
+  4. Focus the target text box/window on the receiving computer.
+  5. Send one of the remote commands below from the sender.
+
+Remote command mode:
+  <text>
+      Default path. Copies text to the receiver clipboard and sends Ctrl+V.
+      Good for normal paste-friendly apps.
+
+  .type <text>
+      Sends keyboard-like events to the focused receiver window.
+      Good for Notepad and standard desktop apps.
+      Some apps reject synthetic keyboard input.
+
+  .set <text>
+      Sets the focused text control through Windows UI Automation.
+      Good when .type is blocked but the target exposes a real editable text control.
+
+  .set
+      Starts multiline set mode. Paste/type formatted code, then enter .end.
+      Use .cancel to abort.
+
+  .setclip
+      Reads the sender's local clipboard and sends it through .set.
+      Best choice for formatted code because it preserves newlines and indentation.
+
+  .screenshot
+      Requests a screenshot from the receiver and places it on the sender clipboard.
+
+  .help
+      Shows command help inside remote command mode.
+
+  .quit
+      Exits remote command mode. Clipboard sync remains active.
+
+Docs:
+  See docs/USAGE.md for detailed examples, troubleshooting, and input-method tradeoffs.
+`);
 }

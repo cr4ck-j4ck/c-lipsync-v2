@@ -1,7 +1,10 @@
+import clipboard from 'clipboardy';
 import inquirer from 'inquirer';
 import * as readline from 'readline';
 import { type Peer } from '../core/types.js';
 import { DiscoveryManager } from '../discovery/udp.js';
+
+type RemoteCommandType = 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SET_TEXT' | 'REMOTE_SCREENSHOT_REQ';
 
 export class UIManager {
   constructor(private discovery: DiscoveryManager) {}
@@ -70,22 +73,50 @@ export class UIManager {
     return selected;
   }
 
-  public startRemotePasteInput(onSend: (text: string, actionType: 'REMOTE_PASTE' | 'REMOTE_TYPE' | 'REMOTE_SET_TEXT' | 'REMOTE_SCREENSHOT_REQ') => void): void {
+  public startRemotePasteInput(onSend: (text: string, actionType: RemoteCommandType) => void): void {
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
       prompt: 'paste > ',
     });
+    let multilineMode: RemoteCommandType | null = null;
+    let multilineLines: string[] = [];
 
     console.log('\n────────────────────────────────────────────');
     console.log('  Remote Command Mode');
-    console.log('  Commands: .help | .quit | .screenshot | .type <text> | .set <text>');
+    console.log('  Commands: .help | .quit | .screenshot | .type <text> | .set <text> | .setclip');
     console.log('────────────────────────────────────────────\n');
 
     rl.prompt();
 
-    rl.on('line', (line: string) => {
+    rl.on('line', async (line: string) => {
       const trimmed = line.trim();
+
+      if (multilineMode) {
+        if (trimmed === '.end') {
+          const payload = multilineLines.join('\n');
+          onSend(payload, multilineMode);
+          console.log(`  → Sent ${multilineLines.length} line(s): "${this.preview(payload)}"`);
+          multilineMode = null;
+          multilineLines = [];
+          rl.setPrompt('paste > ');
+          rl.prompt();
+          return;
+        }
+
+        if (trimmed === '.cancel') {
+          multilineMode = null;
+          multilineLines = [];
+          rl.setPrompt('paste > ');
+          console.log('  → Multiline input cancelled.');
+          rl.prompt();
+          return;
+        }
+
+        multilineLines.push(line);
+        rl.prompt();
+        return;
+      }
 
       if (trimmed === '') {
         rl.prompt();
@@ -99,13 +130,35 @@ export class UIManager {
       }
 
       if (trimmed === '.help') {
-        console.log('\nAvailable commands:');
-        console.log('  .quit         — exit remote command mode');
-        console.log('  .help         — show this help message');
-        console.log('  .screenshot   — command the remote device to take a desktop snapshot and copy it back to you');
-        console.log('  .type <text>  — type text using the strongest available keyboard backend instead of Ctrl+V');
-        console.log('  .set <text>   — set the focused text control through OS accessibility/UI Automation');
-        console.log('  <text>        — default: copy string to clipboard and trigger Ctrl+V on remote device\n');
+        console.log(`
+Available commands:
+  <text>
+      Copy text to the receiver clipboard and trigger Ctrl+V.
+
+  .type <text>
+      Send keyboard-like events to the focused receiver window.
+      Works in many normal apps, but some apps reject synthetic input.
+
+  .set <text>
+      Set the focused text control through OS accessibility/UI Automation.
+      Best for target apps where .type is ignored.
+
+  .set
+      Start multiline focused-text mode. Paste/type formatted text,
+      enter .end on its own line to send, or .cancel to abort.
+
+  .setclip
+      Send your local clipboard through .set. Best for formatted code,
+      because it preserves newlines and indentation.
+
+  .screenshot
+      Ask the receiver to take a screenshot and copy it back to you.
+
+  .quit
+      Exit remote command mode. Clipboard sync remains active.
+
+More docs: docs/USAGE.md
+`);
         rl.prompt();
         return;
       }
@@ -120,8 +173,16 @@ export class UIManager {
       if (trimmed.startsWith('.type ')) {
         const payload = line.substring(6); // Remove `.type ` but keep spaces after
         onSend(payload, 'REMOTE_TYPE');
-        const preview = payload.length > 60 ? payload.substring(0, 57) + '...' : payload;
-        console.log(`  → Sent (as keystrokes): "${preview}"`);
+        console.log(`  → Sent (as keystrokes): "${this.preview(payload)}"`);
+        rl.prompt();
+        return;
+      }
+
+      if (trimmed === '.set') {
+        multilineMode = 'REMOTE_SET_TEXT';
+        multilineLines = [];
+        rl.setPrompt('set > ');
+        console.log('  → Multiline .set mode. Paste/type text now, then enter .end on its own line.');
         rl.prompt();
         return;
       }
@@ -129,16 +190,27 @@ export class UIManager {
       if (trimmed.startsWith('.set ')) {
         const payload = line.substring(5); // Remove `.set ` but keep spaces after
         onSend(payload, 'REMOTE_SET_TEXT');
-        const preview = payload.length > 60 ? payload.substring(0, 57) + '...' : payload;
-        console.log(`  → Sent (as focused text value): "${preview}"`);
+        console.log(`  → Sent (as focused text value): "${this.preview(payload)}"`);
+        rl.prompt();
+        return;
+      }
+
+      if (trimmed === '.setclip') {
+        try {
+          const payload = await clipboard.read();
+          onSend(payload, 'REMOTE_SET_TEXT');
+          console.log(`  → Sent clipboard as focused text: "${this.preview(payload)}"`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`  → Failed to read local clipboard: ${message}`);
+        }
         rl.prompt();
         return;
       }
 
       // Default: send as REMOTE_PASTE
       onSend(line, 'REMOTE_PASTE');
-      const preview = line.length > 60 ? line.substring(0, 57) + '...' : line;
-      console.log(`  → Sent (via Ctrl+V): "${preview}"`);
+      console.log(`  → Sent (via Ctrl+V): "${this.preview(line)}"`);
 
       rl.prompt();
     });
@@ -151,5 +223,10 @@ export class UIManager {
       console.log('\nInterrupted — exiting command mode.');
       rl.close();
     });
+  }
+
+  private preview(text: string): string {
+    const compact = text.replace(/\r\n/g, '\n').replace(/\n/g, '\\n');
+    return compact.length > 60 ? compact.substring(0, 57) + '...' : compact;
   }
 }
