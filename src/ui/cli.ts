@@ -69,7 +69,7 @@ export class UIManager {
         console.log('  .quit         — exit remote command mode');
         console.log('  .help         — show this help message');
         console.log('  .screenshot   — command the remote device to take a desktop snapshot and copy it back to you');
-        console.log('  .type <text>  — explicitly emulate typing instead of Ctrl+V (Bypasses blocks in games/remote-desktops)');
+        console.log('  .type <text>  — type text using the strongest available keyboard backend instead of Ctrl+V');
         console.log('  <text>        — default: copy string to clipboard and trigger Ctrl+V on remote device\n');
         rl.prompt();
         return;
