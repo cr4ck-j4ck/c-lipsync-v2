@@ -156,13 +156,13 @@ Use `.insertclip` when you want paste-like behavior but `.type` or normal paste 
 
 That is expected. `.setclip` means "set the whole focused value." Use `.insertclip` to insert at the cursor.
 
-### `.insertclip` Still Inserts At The End
+### `.insertclip` Typing Fallback
 
-If `.insertclip` falls back to inserting text at the end of the field, it means the target application (commonly Electron apps like Discord or VS Code) does not expose its caret position to Windows UI Automation. If you need it exactly at the caret, consider using `.type` (which injects raw keystrokes instead) or just `.setclip` to replace everything.
+If `.insertclip` cannot perfectly locate the caret through UI Automation (like in Electron apps: Discord, VS Code, Slack etc), it will now automatically fall back to typing the text using keystrokes. This ensures your text still lands right at your actual cursor location, rather than appending everything to the very end of the field.
 
-### `.insertclip` Cannot Find The Cursor
+### Cannot Find The Cursor?
 
-Some controls expose a settable value but do not expose reliable caret information at all. In that case, `.insertclip` will default to appending to the end of your text. If you want to overwrite, use `.setclip` to replace the whole field, or `.type` if the app accepts keyboard injection.
+Some controls expose a settable value but do not expose reliable caret information *and* block keystrokes. In that case, use `.setclip` to replace the whole field.
 
 ### `.set` Sends One Long Line
 

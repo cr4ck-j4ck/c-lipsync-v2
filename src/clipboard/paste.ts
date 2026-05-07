@@ -119,9 +119,19 @@ export class PasteSimulator {
     return Promise.reject(new Error(`Focused text setting is currently implemented only on Windows UI Automation.`));
   }
 
-  private insertFocusedTextControl(text: string): Promise<void> {
+  private async insertFocusedTextControl(text: string): Promise<void> {
     if (this.platform === 'win32') {
-      return this.runWindowsUIAutomationInsertText(text);
+      try {
+        await this.runWindowsUIAutomationInsertText(text);
+      } catch (err) {
+        if (String(err).includes('UIAutomation_End_Fallback')) {
+          console.log(`[PasteSimulator] App does not expose Caret via UIA. Falling back to typing keystrokes...`);
+          await this.runWindowsSendInputText(text);
+          return;
+        }
+        throw err;
+      }
+      return;
     }
 
     return Promise.reject(new Error(`Focused text insertion is currently implemented only on Windows UI Automation.`));
@@ -714,9 +724,10 @@ function Get-SelectionOffsets($element, $valueLength) {
 
   $offsets = Get-OffsetsFromRange $textPattern $ranges[0] "TextPatternSelection"
   
-  # Return offsets. We removed the "Refusing to append blindly" throw
-  # because a) "at the end" is a completely valid cursor position, and 
-  # b) if UIA falls back here, throwing an error makes .insertclip look broken.
+  if ($offsets.Start -eq $valueLength -and $offsets.End -eq $valueLength -and $offsets.SelectedLength -eq 0 -and $valueLength -gt 0) {
+    throw "UIAutomation_End_Fallback"
+  }
+
   return $offsets
 }
 
@@ -742,13 +753,11 @@ for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
     }
 
     if ($null -eq $selection) {
-      # Fallback to appending if we have absolutely no caret info.
-      $start = $value.Length
-      $end = $value.Length
-    } else {
-      $start = [Math]::Max(0, [Math]::Min([int]$selection.Start, $value.Length))
-      $end = [Math]::Max(0, [Math]::Min([int]$selection.End, $value.Length))
+      throw "UIAutomation_End_Fallback"
     }
+
+    $start = [Math]::Max(0, [Math]::Min([int]$selection.Start, $value.Length))
+    $end = [Math]::Max(0, [Math]::Min([int]$selection.End, $value.Length))
     if ($end -lt $start) {
       $tmp = $start
       $start = $end
