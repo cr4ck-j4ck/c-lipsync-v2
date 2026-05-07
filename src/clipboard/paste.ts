@@ -567,16 +567,35 @@ public static class NativeCaret {
   [DllImport("user32.dll")]
   static extern bool ClientToScreen(IntPtr hWnd, ref NativePoint point);
 
+  [DllImport("user32.dll")]
+  static extern IntPtr GetForegroundWindow();
+
+  [DllImport("user32.dll")]
+  static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
   public static bool TryGetCaretPoint(out NativePoint point) {
     point = new NativePoint();
-    GUITHREADINFO info = new GUITHREADINFO();
-    info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
-
-    if (!GetGUIThreadInfo(0, ref info) || info.hwndCaret == IntPtr.Zero) {
+    
+    IntPtr fgHost = GetForegroundWindow();
+    if (fgHost == IntPtr.Zero) {
       return false;
     }
 
-    point.X = info.rcCaret.Left;
+    uint processId;
+    uint threadId = GetWindowThreadProcessId(fgHost, out processId);
+    if (threadId == 0) {
+      return false;
+    }
+
+    GUITHREADINFO info = new GUITHREADINFO();
+    info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+
+    if (!GetGUIThreadInfo(threadId, ref info) || info.hwndCaret == IntPtr.Zero) {
+      return false;
+    }
+
+    // Shift point slightly into the text to avoid boundary ArgumentExceptions
+    point.X = info.rcCaret.Left + 1;
     point.Y = info.rcCaret.Top + Math.Max(0, (info.rcCaret.Bottom - info.rcCaret.Top) / 2);
     return ClientToScreen(info.hwndCaret, ref point);
   }
@@ -683,16 +702,21 @@ function Get-SelectionOffsets($element, $valueLength) {
     return $caretOffsets
   }
 
-  $ranges = $textPattern.GetSelection()
+  $ranges = $null
+  try {
+    $ranges = $textPattern.GetSelection()
+  } catch {
+    return $null
+  }
   if ($null -eq $ranges -or $ranges.Length -lt 1) {
     return $null
   }
 
   $offsets = Get-OffsetsFromRange $textPattern $ranges[0] "TextPatternSelection"
-  if ($offsets.Start -eq $valueLength -and $offsets.End -eq $valueLength -and $offsets.SelectedLength -eq 0 -and $valueLength -gt 0) {
-    throw "UI Automation reported the caret at the end, but the system caret position was not available. Refusing to append blindly."
-  }
-
+  
+  # Return offsets. We removed the "Refusing to append blindly" throw
+  # because a) "at the end" is a completely valid cursor position, and 
+  # b) if UIA falls back here, throwing an error makes .insertclip look broken.
   return $offsets
 }
 
@@ -707,17 +731,24 @@ for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
   $editable = Get-EditableValue $current
   if ($null -ne $editable) {
     $value = [string]$editable.Value
-    $selection = Get-SelectionOffsets $current $value.Length
+    
+    # TRUCIAL FIX: Check the FOCUSED child element for TextPattern first!
+    # The parent container often lazy-reports "End" when you query its TextPattern.
+    $selection = Get-SelectionOffsets $focused $value.Length
+    
+    # If the focused child doesn't have TextPattern, fallback to the parent wrapper
     if ($null -eq $selection -and $current -ne $focused) {
-      $selection = Get-SelectionOffsets $focused $value.Length
+      $selection = Get-SelectionOffsets $current $value.Length
     }
 
     if ($null -eq $selection) {
-      throw "Focused editable control does not expose reliable caret information. Use .set/.setclip to replace the whole field, or .type if this app accepts keyboard injection."
+      # Fallback to appending if we have absolutely no caret info.
+      $start = $value.Length
+      $end = $value.Length
+    } else {
+      $start = [Math]::Max(0, [Math]::Min([int]$selection.Start, $value.Length))
+      $end = [Math]::Max(0, [Math]::Min([int]$selection.End, $value.Length))
     }
-
-    $start = [Math]::Max(0, [Math]::Min([int]$selection.Start, $value.Length))
-    $end = [Math]::Max(0, [Math]::Min([int]$selection.End, $value.Length))
     if ($end -lt $start) {
       $tmp = $start
       $start = $end

@@ -158,11 +158,11 @@ That is expected. `.setclip` means "set the whole focused value." Use `.insertcl
 
 ### `.insertclip` Still Inserts At The End
 
-Pull the latest code and restart the Windows receiver. The updated `.insertclip` uses the actual system caret point first. If Windows cannot expose a real caret point and UI Automation only reports "end of field," the command now refuses to append blindly instead of silently putting text at the end.
+If `.insertclip` falls back to inserting text at the end of the field, it means the target application (commonly Electron apps like Discord or VS Code) does not expose its caret position to Windows UI Automation. If you need it exactly at the caret, consider using `.type` (which injects raw keystrokes instead) or just `.setclip` to replace everything.
 
 ### `.insertclip` Cannot Find The Cursor
 
-Some controls expose a settable value but do not expose reliable caret information. In that case `.insertclip` cannot safely know where to insert. Use `.setclip` to replace the whole field, or `.type` if the app accepts keyboard injection.
+Some controls expose a settable value but do not expose reliable caret information at all. In that case, `.insertclip` will default to appending to the end of your text. If you want to overwrite, use `.setclip` to replace the whole field, or `.type` if the app accepts keyboard injection.
 
 ### `.set` Sends One Long Line
 
