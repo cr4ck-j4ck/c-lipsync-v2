@@ -59,18 +59,26 @@ export class PasteSimulator {
       const message = err instanceof Error ? err.message : String(err);
       // If UIA couldn't find ValuePattern, fall back to Ctrl+A then clipboard + Ctrl+V
       if (message.includes('UIA_VALUEPAT_NOTFOUND') || message.includes('UIAutomation_End_Fallback')) {
-        console.log(`[PasteSimulator] App does not expose ValuePattern via UIA (or is Chromium). Falling back to Select All (Ctrl+A) + Paste (Ctrl+V)...`);
+        console.log(`[PasteSimulator] App does not expose ValuePattern via UIA (or is Chromium). Falling back to Select All (Ctrl+A) + Typing...`);
         try {
-          const oldClip = await clipboard.read().catch(() => '');
-          await clipboard.write(text);
           await this.simulateSelectAll();
           await this.sleep(100);
-          await this.simulateKeystroke();
-          await this.sleep(100);
-          if (oldClip) await clipboard.write(oldClip);
-          return true;
+          
+          try {
+            console.log(`[PasteSimulator] Attempting to type text directly (hardware-like fallback)...`);
+            await this.simulateTyping(text);
+            return true;
+          } catch (typeErr) {
+            console.log(`[PasteSimulator] Typing failed, falling back to Paste (Ctrl+V)...`);
+            const oldClip = await clipboard.read().catch(() => '');
+            await clipboard.write(text);
+            await this.simulateKeystroke();
+            await this.sleep(100);
+            if (oldClip) await clipboard.write(oldClip);
+            return true;
+          }
         } catch (pasteErr) {
-          console.error(`[PasteSimulator] Fallback paste failed:`, pasteErr);
+          console.error(`[PasteSimulator] Fallback failed:`, pasteErr);
         }
       }
       console.error(`\n[PasteSimulator Error] Failed to set focused text:\n  -> ${message}`);
@@ -514,6 +522,8 @@ public static class NativeInput {
   const uint KEYEVENTF_SCANCODE = 0x0008;
   const uint MAPVK_VK_TO_VSC = 0;
 
+  static Random rnd = new Random();
+
   static void Send(INPUT input) {
     uint sent = SendInput(1, new INPUT[] { input }, Marshal.SizeOf(typeof(INPUT)));
     if (sent != 1) {
@@ -539,6 +549,7 @@ public static class NativeInput {
 
   static void TapScan(ushort scan, bool extended) {
     Send(ScanInput(scan, false, extended));
+    Thread.Sleep(rnd.Next(15, 30)); // Small hardware-like delay between key down and up
     Send(ScanInput(scan, true, extended));
   }
 
@@ -567,6 +578,7 @@ public static class NativeInput {
       short packed = VkKeyScanEx(ch, layout);
       if (packed == -1) {
         Send(UnicodeInput(ch, false));
+        Thread.Sleep(rnd.Next(15, 30));
         Send(UnicodeInput(ch, true));
       } else {
         ushort vk = (ushort)(packed & 0xff);
@@ -584,7 +596,8 @@ public static class NativeInput {
         if (ctrl) SetModifier(0x11, false, layout);
         if (shift) SetModifier(0x10, false, layout);
       }
-      Thread.Sleep(20);
+      // Add a slightly random human-like delay between 15ms and 45ms to avoid simple anti-cheat detection
+      Thread.Sleep(rnd.Next(15, 45));
     }
   }
 }

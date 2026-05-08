@@ -46,7 +46,7 @@ export class DiscoveryManager {
 
   public start() {
     // Bind on all interfaces so we receive broadcasts from any subnet
-    this.socket.bind(DISCOVERY_PORT, '0.0.0.0', () => {
+    this.socket.bind(DISCOVERY_PORT, () => {
       console.log(`[Discovery] Listening for peers on UDP port ${DISCOVERY_PORT}`);
       console.log(
         `[Discovery] WINDOWS TIP: If other devices are not visible, run this in an Admin PowerShell:\n` +
@@ -90,8 +90,10 @@ export class DiscoveryManager {
       }
     }
 
+    const buf = Buffer.from(payload);
+
     for (const addr of targets) {
-      this.socket.send(payload, 0, payload.length, DISCOVERY_PORT, addr, () => {
+      this.socket.send(buf, 0, buf.length, DISCOVERY_PORT, addr, () => {
         // Silent catch for broadcast errors on unconnected interfaces
       });
     }
