@@ -636,10 +636,6 @@ function Try-SetAutomationValue($element, $value) {
 $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
 if ($null -eq $focused) { throw "No focused UI Automation element found." }
 
-if ($focused.Current.FrameworkId -match '(?i)^(Chrome|Electron)') {
-  throw "UIA_VALUEPAT_NOTFOUND"
-}
-
 $current = $focused
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
@@ -647,7 +643,7 @@ for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
   $current = $walker.GetParent($current)
 }
 
-throw "UIA_VALUEPAT_NOTFOUND"
+throw "UIAutomation_End_Fallback"
     `;
   }
 
@@ -703,10 +699,6 @@ if ($null -eq $insertText) { $insertText = '' }
 
 $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
 if ($null -eq $focused) { throw 'INSERT_NEEDS_TYPING_FALLBACK' }
-
-if ($focused.Current.FrameworkId -match '(?i)^(Chrome|Electron)') {
-  throw 'INSERT_NEEDS_TYPING_FALLBACK'
-}
 
 $focusedHwnd = [System.IntPtr]::new([long]$focused.Current.NativeWindowHandle)
 
