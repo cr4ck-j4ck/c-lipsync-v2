@@ -85,6 +85,12 @@ export class PasteSimulator {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`\n[PasteSimulator Error] Failed to insert focused text:\n  -> ${message}`);
+      
+      // Provide helpful context based on error type
+      if (message.includes('UIAutomation_End_Fallback')) {
+        console.log('[PasteSimulator] This is expected for Chromium/Electron apps or when caret detection fails.');
+      }
+      
       return false;
     }
   }
@@ -139,8 +145,9 @@ export class PasteSimulator {
       try {
         await this.runWindowsUIAutomationInsertText(text);
       } catch (err) {
-        if (String(err).includes('UIAutomation_End_Fallback')) {
-          console.log(`[PasteSimulator] App does not expose Caret via UIA. Falling back to native system Paste (Ctrl+V)...`);
+        const errorMsg = String(err);
+        if (errorMsg.includes('UIAutomation_End_Fallback')) {
+          console.log(`[PasteSimulator] UIA insertion not available or unreliable. Using clipboard fallback (Ctrl+V)...`);
           
           try {
             // Backup current clipboard
@@ -149,16 +156,24 @@ export class PasteSimulator {
             // Set text to clipboard
             await clipboard.write(text);
             
+            // Small delay to ensure clipboard is ready
+            await this.sleep(50);
+            
             // Simulate Ctrl+V to paste the text directly at the active cursor
             await this.simulateKeystroke();
             
-            // Optional: small delay, then restore
+            // Wait for paste to complete
             await this.sleep(100);
+            
+            // Restore original clipboard
             if (oldClip) {
               await clipboard.write(oldClip);
             }
+            
+            console.log('[PasteSimulator] Clipboard fallback completed successfully.');
           } catch (pasteErr) {
-            console.error(`[PasteSimulator] Failed fallback paste execution:`, pasteErr);
+            console.error(`[PasteSimulator] Clipboard fallback failed:`, pasteErr);
+            throw pasteErr;
           }
           
           return;
@@ -568,6 +583,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Diagnostics;
 
 public struct NativePoint {
   public int X;
@@ -594,6 +610,7 @@ public static class NativeCaret {
   [DllImport("user32.dll")] static extern uint    GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
   [DllImport("user32.dll")] static extern IntPtr  SendMessage(IntPtr hWnd, uint msg, IntPtr wP, IntPtr lP);
   [DllImport("user32.dll")] static extern IntPtr  SendMessage(IntPtr hWnd, uint msg, IntPtr wP, StringBuilder lP);
+  [DllImport("user32.dll")] static extern int     GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
   // Try EM_GETSEL to get caret offset — works for any Win32 EDIT or RichEdit control.
   public static bool TryEmGetSel(IntPtr hwnd, out int selStart, out int selEnd) {
@@ -633,21 +650,64 @@ public static class NativeCaret {
     point.Y = info.rcCaret.Top + Math.Max(0, (info.rcCaret.Bottom - info.rcCaret.Top) / 2);
     return ClientToScreen(info.hwndCaret, ref point);
   }
+
+  // Get window class name
+  public static string GetWindowClass(IntPtr hwnd) {
+    if (hwnd == IntPtr.Zero) return "";
+    var sb = new StringBuilder(256);
+    GetClassName(hwnd, sb, sb.Capacity);
+    return sb.ToString();
+  }
+
+  // Check if process is Chromium/Electron-based
+  public static bool IsChromiumBased(IntPtr hwnd) {
+    if (hwnd == IntPtr.Zero) return false;
+    uint pid;
+    GetWindowThreadProcessId(hwnd, out pid);
+    try {
+      var proc = Process.GetProcessById((int)pid);
+      string name = proc.ProcessName.ToLowerInvariant();
+      // Common Chromium/Electron process names
+      return name.Contains("electron") || name.Contains("chrome") || 
+             name.Contains("msedge") || name.Contains("brave") ||
+             name.Contains("discord") || name.Contains("slack") ||
+             name.Contains("vscode") || name.Contains("code");
+    } catch {
+      return false;
+    }
+  }
 }
 '@
 
 $insertText = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
 
 $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-if ($null -eq $focused) { throw "UIAutomation_End_Fallback" }
+if ($null -eq $focused) { 
+  Write-Host "[DEBUG] No focused UIA element found - falling back to clipboard paste"
+  throw "UIAutomation_End_Fallback" 
+}
 
 $focusedHwnd = [System.IntPtr]::new([long]$focused.Current.NativeWindowHandle)
+$windowClass = [NativeCaret]::GetWindowClass($focusedHwnd)
+$isChromium = [NativeCaret]::IsChromiumBased($focusedHwnd)
+
+Write-Host "[DEBUG] Window class: $windowClass, Chromium-based: $isChromium"
+
+# ── Strategy 0: Chromium/Electron Detection → Immediate Clipboard Fallback ──────────────────
+# Chromium apps (Electron, VS Code, Discord, web-based editors) have unreliable UIA TextPattern.
+# The most reliable method is clipboard + Ctrl+V, which they handle natively.
+if ($isChromium -or $windowClass -match "Chrome_RenderWidgetHostHWND|Intermediate D3D Window") {
+  Write-Host "[DEBUG] Detected Chromium/Electron app - using clipboard fallback for maximum reliability"
+  throw "UIAutomation_End_Fallback"
+}
 
 # ── Strategy 1: EM_GETSEL + WM_GETTEXT (fastest, works for any Win32 EDIT/RichEdit) ──────────
 $emStart = -1; $emEnd = -1
 if ([NativeCaret]::TryEmGetSel($focusedHwnd, [ref]$emStart, [ref]$emEnd)) {
+  Write-Host "[DEBUG] EM_GETSEL succeeded: start=$emStart, end=$emEnd"
   $windowText = ""
   if ([NativeCaret]::TryWmGetText($focusedHwnd, [ref]$windowText)) {
+    Write-Host "[DEBUG] WM_GETTEXT succeeded: length=$($windowText.Length)"
     $s = [Math]::Max(0, [Math]::Min($emStart, $windowText.Length))
     $e = [Math]::Max(0, [Math]::Min($emEnd,   $windowText.Length))
     if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
@@ -659,14 +719,18 @@ if ([NativeCaret]::TryEmGetSel($focusedHwnd, [ref]$emStart, [ref]$emEnd)) {
     for ($i = 0; $i -lt 6 -and $null -ne $cur; $i++) {
       if ($cur.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vpat)) {
         $vp = [System.Windows.Automation.ValuePattern]$vpat
-        if (-not $vp.Current.IsReadOnly) { $vp.SetValue($newText); exit 0 }
+        if (-not $vp.Current.IsReadOnly) { 
+          Write-Host "[DEBUG] Setting value via ValuePattern (EM_GETSEL strategy)"
+          $vp.SetValue($newText)
+          exit 0 
+        }
       }
       $cur = $walker.GetParent($cur)
     }
   }
 }
 
-# ── Strategy 2: UIA TextPattern + ValuePattern (works for Electron, WPF, etc.) ──────────────
+# ── Strategy 2: UIA TextPattern + ValuePattern (works for WPF, some Electron) ────────────────
 function Get-OffsetsFromRange($tp, $range) {
   $doc = $tp.DocumentRange; $before = $doc.Clone()
   $null = $before.MoveEndpointByRange(
@@ -678,25 +742,55 @@ function Get-OffsetsFromRange($tp, $range) {
 
 function Try-GetCaret($element, $valueLen) {
   $tpat = $null
-  if (-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tpat)) { return $null }
+  if (-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tpat)) { 
+    return $null 
+  }
   $tp = [System.Windows.Automation.TextPattern]$tpat
 
+  # Try GetGUIThreadInfo + RangeFromPoint
   $cp = New-Object NativePoint
   if ([NativeCaret]::TryGetCaretPoint($focusedHwnd, [ref]$cp)) {
     try {
       $pt = New-Object System.Windows.Point([double]$cp.X, [double]$cp.Y)
-      return Get-OffsetsFromRange $tp ($tp.RangeFromPoint($pt))
-    } catch {}
+      $range = $tp.RangeFromPoint($pt)
+      $off = Get-OffsetsFromRange $tp $range
+      Write-Host "[DEBUG] RangeFromPoint succeeded: start=$($off.Start), end=$($off.End), valueLen=$valueLen"
+      
+      # Validate: caret should not be beyond text length
+      if ($off.Start -le $valueLen -and $off.End -le $valueLen) {
+        return $off
+      } else {
+        Write-Host "[DEBUG] RangeFromPoint returned invalid offset (beyond text length) - rejecting"
+      }
+    } catch {
+      Write-Host "[DEBUG] RangeFromPoint failed: $_"
+    }
   }
 
+  # Try GetSelection
   try {
     $ranges = $tp.GetSelection()
     if ($ranges -and $ranges.Length -gt 0) {
       $off = Get-OffsetsFromRange $tp $ranges[0]
-      if ($off.Start -eq $valueLen -and $off.End -eq $valueLen -and $valueLen -gt 0) { return $null }
-      return $off
+      Write-Host "[DEBUG] GetSelection succeeded: start=$($off.Start), end=$($off.End), valueLen=$valueLen"
+      
+      # Validate: selection should be within text bounds
+      if ($off.Start -le $valueLen -and $off.End -le $valueLen) {
+        # Additional validation: if offset is at the very end and text is non-empty,
+        # this might be a false positive (common in virtualized editors)
+        if ($off.Start -eq $valueLen -and $valueLen -gt 0) {
+          Write-Host "[DEBUG] GetSelection returned end-of-document - likely unreliable, rejecting"
+          return $null
+        }
+        return $off
+      } else {
+        Write-Host "[DEBUG] GetSelection returned invalid offset (beyond text length) - rejecting"
+      }
     }
-  } catch {}
+  } catch {
+    Write-Host "[DEBUG] GetSelection failed: $_"
+  }
+  
   return $null
 }
 
@@ -719,26 +813,41 @@ for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
   }
 
   if (($null -ne $vpat2) -or ($isLegacy)) {
+    Write-Host "[DEBUG] Found ValuePattern/LegacyIAccessible at level $i, value length: $($val.Length)"
+    
     $off = Try-GetCaret $focused $val.Length
-    if ($null -eq $off -and $current -ne $focused) { $off = Try-GetCaret $current $val.Length }
-    if ($null -ne $off) {
-      $s = [Math]::Max(0, [Math]::Min([int]$off.Start, $val.Length))
-      $e = [Math]::Max(0, [Math]::Min([int]$off.End,   $val.Length))
-      if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
-      $newVal = $val.Substring(0, $s) + $insertText + $val.Substring($e)
-      
-      if ($isLegacy) {
-        ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPat).SetValue($newVal)
-      } else {
-        $vp2.SetValue($newVal)
-      }
-      exit 0
+    if ($null -eq $off -and $current -ne $focused) { 
+      $off = Try-GetCaret $current $val.Length 
     }
-    throw "UIAutomation_End_Fallback"
+    
+    # CRITICAL CHANGE: Do NOT silently fall back to end-of-document
+    # If caret detection failed, throw fallback error to trigger clipboard paste
+    if ($null -eq $off) {
+      Write-Host "[DEBUG] Caret detection failed completely - falling back to clipboard paste"
+      throw "UIAutomation_End_Fallback"
+    }
+
+    # Apply insertion
+    $s = [Math]::Max(0, [Math]::Min([int]$off.Start, $val.Length))
+    $e = [Math]::Max(0, [Math]::Min([int]$off.End,   $val.Length))
+    if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
+    
+    Write-Host "[DEBUG] Inserting at offset: start=$s, end=$e"
+    $newVal = $val.Substring(0, $s) + $insertText + $val.Substring($e)
+    
+    if ($isLegacy) {
+      Write-Host "[DEBUG] Setting value via LegacyIAccessiblePattern"
+      ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPat).SetValue($newVal)
+    } else {
+      Write-Host "[DEBUG] Setting value via ValuePattern"
+      $vp2.SetValue($newVal)
+    }
+    exit 0
   }
   $current = $walker.GetParent($current)
 }
 
+Write-Host "[DEBUG] No suitable ValuePattern found - falling back to clipboard paste"
 throw "UIAutomation_End_Fallback"
     `;
   }
