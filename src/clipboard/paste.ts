@@ -126,6 +126,14 @@ export class PasteSimulator {
     }
 
     if (this.platform === 'win32') {
+      const charCount = text.length;
+      const lineCount = (text.match(/\n/g) || []).length + 1;
+      const estimatedSeconds = Math.ceil(charCount * 0.02); // ~20ms per char
+      
+      if (charCount > 100) {
+        console.log(`[PasteSimulator] Typing ${charCount} characters (${lineCount} lines), estimated ${estimatedSeconds}s...`);
+      }
+      
       return this.runWindowsSendInputText(text);
     }
 
@@ -147,33 +155,34 @@ export class PasteSimulator {
       } catch (err) {
         const errorMsg = String(err);
         if (errorMsg.includes('UIAutomation_End_Fallback')) {
-          console.log(`[PasteSimulator] UIA insertion not available or unreliable. Using clipboard fallback (Ctrl+V)...`);
+          console.log(`[PasteSimulator] UIA insertion not available or unreliable.`);
+          console.log(`[PasteSimulator] Attempting character-by-character typing (Monaco/CodeMirror compatible)...`);
           
           try {
-            // Backup current clipboard
-            const oldClip = await clipboard.read().catch(() => '');
+            // For browser-based editors (Monaco, CodeMirror), character-by-character typing
+            // is the ONLY reliable method because:
+            // 1. Paste events get intercepted by JavaScript
+            // 2. Synthetic Ctrl+V is not trusted by editor frameworks
+            // 3. Character events bypass paste handlers and go directly to editor model
+            await this.simulateTyping(text);
+            console.log('[PasteSimulator] Character-by-character typing completed successfully.');
+          } catch (typeErr) {
+            console.error(`[PasteSimulator] Character typing failed:`, typeErr);
             
-            // Set text to clipboard
-            await clipboard.write(text);
-            
-            // Small delay to ensure clipboard is ready
-            await this.sleep(50);
-            
-            // Simulate Ctrl+V to paste the text directly at the active cursor
-            await this.simulateKeystroke();
-            
-            // Wait for paste to complete
-            await this.sleep(100);
-            
-            // Restore original clipboard
-            if (oldClip) {
-              await clipboard.write(oldClip);
+            // Final fallback: try clipboard paste anyway (may work in some apps)
+            console.log(`[PasteSimulator] Falling back to clipboard paste as last resort...`);
+            try {
+              const oldClip = await clipboard.read().catch(() => '');
+              await clipboard.write(text);
+              await this.sleep(50);
+              await this.simulateKeystroke();
+              await this.sleep(100);
+              if (oldClip) await clipboard.write(oldClip);
+              console.log('[PasteSimulator] Clipboard fallback completed.');
+            } catch (pasteErr) {
+              console.error(`[PasteSimulator] All insertion methods failed:`, pasteErr);
+              throw pasteErr;
             }
-            
-            console.log('[PasteSimulator] Clipboard fallback completed successfully.');
-          } catch (pasteErr) {
-            console.error(`[PasteSimulator] Clipboard fallback failed:`, pasteErr);
-            throw pasteErr;
           }
           
           return;
@@ -272,6 +281,11 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
   }
 
   private runWindowsSendInputText(text: string): Promise<void> {
+    // Calculate timeout based on text length
+    // ~20ms per character + 2s buffer
+    const estimatedMs = text.length * 20 + 2000;
+    const timeout = Math.max(10000, Math.min(estimatedMs, 300000)); // 10s min, 5min max
+    
     return this.runCommand(
       'powershell',
       [
@@ -281,7 +295,7 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
         '-EncodedCommand',
         this.encodePowerShellCommand(this.getWindowsSendInputScript('TypeText')),
       ],
-      60000,
+      timeout,
       { CLIPSYNC_REMOTE_TEXT: text },
     )
       .then(() => undefined)
@@ -504,9 +518,38 @@ public static class NativeInput {
 
   public static void TypeText(string text) {
     IntPtr layout = GetKeyboardLayout(0);
+    
+    // For Monaco/CodeMirror editors, we need human-like timing
+    // Too fast = editor may batch/drop events
+    // Too slow = user frustration
+    // Sweet spot: 15-25ms per character with slight randomization
+    Random rnd = new Random();
+    
     foreach (char ch in text) {
+      // Handle newlines specially - they need to be Enter key, not literal \\n
+      if (ch == '\\n') {
+        ushort enterScan = (ushort)MapVirtualKeyEx(0x0D, MAPVK_VK_TO_VSC, layout);
+        TapScan(enterScan, false);
+        Thread.Sleep(rnd.Next(30, 50)); // Slightly longer delay after newline
+        continue;
+      }
+      
+      // Handle carriage return (skip it, we already handled \\n)
+      if (ch == '\\r') {
+        continue;
+      }
+      
+      // Handle tab specially
+      if (ch == '\\t') {
+        ushort tabScan = (ushort)MapVirtualKeyEx(0x09, MAPVK_VK_TO_VSC, layout);
+        TapScan(tabScan, false);
+        Thread.Sleep(rnd.Next(20, 35));
+        continue;
+      }
+      
       short packed = VkKeyScanEx(ch, layout);
       if (packed == -1) {
+        // Character not in keyboard layout - use Unicode input
         Send(UnicodeInput(ch, false));
         Send(UnicodeInput(ch, true));
       } else {
@@ -525,7 +568,9 @@ public static class NativeInput {
         if (ctrl) SetModifier(0x11, false, layout);
         if (shift) SetModifier(0x10, false, layout);
       }
-      Thread.Sleep(20);
+      
+      // Human-like timing with randomization to avoid detection/batching
+      Thread.Sleep(rnd.Next(15, 25));
     }
   }
 }
