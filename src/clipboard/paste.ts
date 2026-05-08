@@ -536,6 +536,12 @@ function Try-SetAutomationValue($element, $value) {
     $vp.SetValue($value)
     return $true
   }
+
+  $legacyPattern = $null
+  if ($element.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPattern)) {
+    ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPattern).SetValue($value)
+    return $true
+  }
   return $false
 }
 
@@ -549,7 +555,7 @@ for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
   $current = $walker.GetParent($current)
 }
 
-throw "UIA_VALUEPAT_NOTFOUND"
+throw "UIAutomation_End_Fallback"
     `;
   }
 
@@ -698,21 +704,37 @@ $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $current = $focused
 for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
   $vpat2 = $null
+  $legacyPat = $null
+  $isLegacy = $false
+  $val = ""
+
   if ($current.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vpat2)) {
     $vp2 = [System.Windows.Automation.ValuePattern]$vpat2
     if (-not $vp2.Current.IsReadOnly) {
       $val = [string]$vp2.Current.Value
-      $off = Try-GetCaret $focused $val.Length
-      if ($null -eq $off -and $current -ne $focused) { $off = Try-GetCaret $current $val.Length }
-      if ($null -ne $off) {
-        $s = [Math]::Max(0, [Math]::Min([int]$off.Start, $val.Length))
-        $e = [Math]::Max(0, [Math]::Min([int]$off.End,   $val.Length))
-        if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
-        $vp2.SetValue($val.Substring(0, $s) + $insertText + $val.Substring($e))
-        exit 0
+    } else { $vpat2 = $null }
+  } elseif ($current.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPat)) {
+    $isLegacy = $true
+    $val = [string]([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPat).Current.Value
+  }
+
+  if (($null -ne $vpat2) -or ($isLegacy)) {
+    $off = Try-GetCaret $focused $val.Length
+    if ($null -eq $off -and $current -ne $focused) { $off = Try-GetCaret $current $val.Length }
+    if ($null -ne $off) {
+      $s = [Math]::Max(0, [Math]::Min([int]$off.Start, $val.Length))
+      $e = [Math]::Max(0, [Math]::Min([int]$off.End,   $val.Length))
+      if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
+      $newVal = $val.Substring(0, $s) + $insertText + $val.Substring($e)
+      
+      if ($isLegacy) {
+        ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPat).SetValue($newVal)
+      } else {
+        $vp2.SetValue($newVal)
       }
-      throw "UIAutomation_End_Fallback"
+      exit 0
     }
+    throw "UIAutomation_End_Fallback"
   }
   $current = $walker.GetParent($current)
 }
