@@ -57,12 +57,14 @@ export class PasteSimulator {
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // If UIA couldn't find ValuePattern, fall back to clipboard + Ctrl+V
+      // If UIA couldn't find ValuePattern, fall back to Ctrl+A then clipboard + Ctrl+V
       if (message.includes('UIA_VALUEPAT_NOTFOUND') || message.includes('UIAutomation_End_Fallback')) {
-        console.log(`[PasteSimulator] App does not expose ValuePattern via UIA. Falling back to native system Paste (Ctrl+V)...`);
+        console.log(`[PasteSimulator] App does not expose ValuePattern via UIA (or is Chromium). Falling back to Select All (Ctrl+A) + Paste (Ctrl+V)...`);
         try {
           const oldClip = await clipboard.read().catch(() => '');
           await clipboard.write(text);
+          await this.simulateSelectAll();
+          await this.sleep(100);
           await this.simulateKeystroke();
           await this.sleep(100);
           if (oldClip) await clipboard.write(oldClip);
@@ -177,6 +179,29 @@ export class PasteSimulator {
     }
 
     return Promise.reject(new Error(`Focused text insertion is currently implemented only on Windows UI Automation.`));
+  }
+
+  private simulateSelectAll(): Promise<void> {
+    if (this.platform === 'linux') {
+      return this.tryCommands([
+        { command: 'ydotool', args: ['key', '29:1', '30:1', '30:0', '29:0'], timeout: 3000 },
+        { command: 'wtype', args: ['-M', 'ctrl', '-k', 'a', '-m', 'ctrl'], timeout: 3000 },
+        { command: 'xdotool', args: ['key', '--clearmodifiers', 'ctrl+a'], timeout: 3000 },
+      ], `Linux select-all requires 'ydotool', 'wtype', or 'xdotool'.`);
+    }
+
+    if (this.platform === 'darwin') {
+      return this.runCommand('osascript', [
+        '-e',
+        'tell application "System Events" to keystroke "a" using command down',
+      ], 5000).then(() => undefined);
+    }
+
+    if (this.platform === 'win32') {
+      return this.runWindowsSendInputSelectAll();
+    }
+
+    return Promise.reject(new Error(`Unsupported platform: ${this.platform}`));
   }
 
   private simulateKeystroke(): Promise<void> {
@@ -297,6 +322,38 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
       .catch(() => this.runWindowsSendKeysPaste());
   }
 
+  private runWindowsSendInputSelectAll(): Promise<void> {
+    return this.runCommand(
+      'powershell',
+      [
+        '-WindowStyle', 'Hidden',
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        this.encodePowerShellCommand(this.getWindowsSendInputScript('SelectAll')),
+      ],
+      5000,
+    )
+      .then(() => undefined)
+      .catch(() => this.runWindowsSendKeysSelectAll());
+  }
+
+  private runWindowsSendKeysSelectAll(): Promise<void> {
+    return this.runCommand(
+      'powershell',
+      [
+        '-WindowStyle', 'Hidden',
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        this.encodePowerShellCommand('Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^a")')
+      ],
+      5000,
+    ).then(() => undefined).catch(result => {
+      throw new Error(`Windows select-all failed. SendInput and SendKeys both failed: ${result.stderr}`);
+    });
+  }
+
   private runWindowsSendKeysText(text: string): Promise<void> {
     // SendKeys syntax requires escaping these characters: + ^ % ~ ( ) [ ] { }
     const escaped = text.replace(/([+^%~()[\]{}])/g, '{$1}');
@@ -385,10 +442,12 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
     });
   }
 
-  private getWindowsSendInputScript(mode: 'TypeText' | 'Paste'): string {
+  private getWindowsSendInputScript(mode: 'TypeText' | 'Paste' | 'SelectAll'): string {
     const invocation = mode === 'TypeText'
       ? `[NativeInput]::TypeText([Environment]::GetEnvironmentVariable("CLIPSYNC_REMOTE_TEXT", "Process"))`
-      : '[NativeInput]::Paste()';
+      : mode === 'Paste' 
+        ? '[NativeInput]::Paste()' 
+        : '[NativeInput]::SelectAll()';
 
     return `
 Add-Type -TypeDefinition @'
@@ -495,6 +554,13 @@ public static class NativeInput {
     SetModifier(0x11, false, layout);
   }
 
+  public static void SelectAll() {
+    IntPtr layout = GetKeyboardLayout(0);
+    SetModifier(0x11, true, layout);
+    TapScan((ushort)MapVirtualKeyEx(0x41, MAPVK_VK_TO_VSC, layout), false);
+    SetModifier(0x11, false, layout);
+  }
+
   public static void TypeText(string text) {
     IntPtr layout = GetKeyboardLayout(0);
     foreach (char ch in text) {
@@ -549,6 +615,10 @@ function Try-SetAutomationValue($element, $value) {
 
 $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
 if ($null -eq $focused) { throw "No focused UI Automation element found." }
+
+if ($focused.Current.FrameworkId -match '(?i)^(Chrome|Electron)') {
+  throw "UIA_VALUEPAT_NOTFOUND"
+}
 
 $current = $focused
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
@@ -613,6 +683,10 @@ if ($null -eq $insertText) { $insertText = '' }
 
 $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
 if ($null -eq $focused) { throw 'INSERT_NEEDS_TYPING_FALLBACK' }
+
+if ($focused.Current.FrameworkId -match '(?i)^(Chrome|Electron)') {
+  throw 'INSERT_NEEDS_TYPING_FALLBACK'
+}
 
 $focusedHwnd = [System.IntPtr]::new([long]$focused.Current.NativeWindowHandle)
 
