@@ -1,0 +1,393 @@
+2a3
+> import clipboard from 'clipboardy';
+58a60,83
+>       // If UIA couldn't find ValuePattern, fall back to Ctrl+A then clipboard + Ctrl+V
+>       if (message.includes('UIA_VALUEPAT_NOTFOUND') || message.includes('UIAutomation_End_Fallback')) {
+>         console.log(`[PasteSimulator] App does not expose ValuePattern via UIA (or is Chromium). Falling back to Select All (Ctrl+A) + Typing...`);
+>         try {
+>           await this.simulateSelectAll();
+>           await this.sleep(100);
+>           
+>           try {
+>             console.log(`[PasteSimulator] Attempting to type text directly (hardware-like fallback)...`);
+>             await this.simulateTyping(text);
+>             return true;
+>           } catch (typeErr) {
+>             console.log(`[PasteSimulator] Typing failed, falling back to Paste (Ctrl+V)...`);
+>             const oldClip = await clipboard.read().catch(() => '');
+>             await clipboard.write(text);
+>             await this.simulateKeystroke();
+>             await this.sleep(100);
+>             if (oldClip) await clipboard.write(oldClip);
+>             return true;
+>           }
+>         } catch (pasteErr) {
+>           console.error(`[PasteSimulator] Fallback failed:`, pasteErr);
+>         }
+>       }
+63a89,101
+>   public async insertFocusedText(text: string): Promise<boolean> {
+>     await this.sleep(150);
+> 
+>     try {
+>       await this.insertFocusedTextControl(text);
+>       return true;
+>     } catch (err) {
+>       const message = err instanceof Error ? err.message : String(err);
+>       console.error(`\n[PasteSimulator Error] All insert strategies failed:\n  -> ${message}`);
+>       return false;
+>     }
+>   }
+> 
+108a147,214
+>   private async insertFocusedTextControl(text: string): Promise<void> {
+>     if (this.platform === 'win32') {
+>       // Tier 1 & 2 are handled inside the PowerShell script.
+>       // Exit code 0 = success (EM_REPLACESEL or UIA insert worked).
+>       // Exit code 10 = no native Edit and no UIA caret — need typing fallback.
+>       // Any other error = unexpected failure.
+>       try {
+>         await this.runWindowsUIAutomationInsertText(text);
+>         // Tier 1 or 2 succeeded
+>         return;
+>       } catch (err) {
+>         const msg = String(err);
+> 
+>         if (msg.includes('INSERT_NEEDS_TYPING_FALLBACK')) {
+>           // Tier 3: Type characters via SendInput — types at the real OS caret
+>           console.log('[PasteSimulator] UIA caret not available. Falling back to SendInput typing at active cursor...');
+>           try {
+>             await this.runWindowsSendInputText(text);
+>             console.log('[PasteSimulator] Text typed successfully via SendInput.');
+>             return;
+>           } catch {
+>             console.log('[PasteSimulator] SendInput typing failed. Falling back to clipboard paste...');
+>           }
+> 
+>           // Tier 4: Clipboard + Ctrl+V — last resort
+>           try {
+>             const oldClip = await clipboard.read().catch(() => '');
+>             await clipboard.write(text);
+>             await this.simulateKeystroke();
+>             await this.sleep(150);
+>             if (oldClip) await clipboard.write(oldClip);
+>             console.log('[PasteSimulator] Text pasted via clipboard Ctrl+V fallback.');
+>             return;
+>           } catch (pasteErr) {
+>             console.error('[PasteSimulator] All fallback strategies failed:', pasteErr);
+>           }
+>         }
+> 
+>         throw err;
+>       }
+>     }
+> 
+>     return Promise.reject(new Error(`Focused text insertion is currently implemented only on Windows UI Automation.`));
+>   }
+> 
+>   private simulateSelectAll(): Promise<void> {
+>     if (this.platform === 'linux') {
+>       return this.tryCommands([
+>         { command: 'ydotool', args: ['key', '29:1', '30:1', '30:0', '29:0'], timeout: 3000 },
+>         { command: 'wtype', args: ['-M', 'ctrl', '-k', 'a', '-m', 'ctrl'], timeout: 3000 },
+>         { command: 'xdotool', args: ['key', '--clearmodifiers', 'ctrl+a'], timeout: 3000 },
+>       ], `Linux select-all requires 'ydotool', 'wtype', or 'xdotool'.`);
+>     }
+> 
+>     if (this.platform === 'darwin') {
+>       return this.runCommand('osascript', [
+>         '-e',
+>         'tell application "System Events" to keystroke "a" using command down',
+>       ], 5000).then(() => undefined);
+>     }
+> 
+>     if (this.platform === 'win32') {
+>       return this.runWindowsSendInputSelectAll();
+>     }
+> 
+>     return Promise.reject(new Error(`Unsupported platform: ${this.platform}`));
+>   }
+> 
+226a333,364
+>   private runWindowsSendInputSelectAll(): Promise<void> {
+>     return this.runCommand(
+>       'powershell',
+>       [
+>         '-WindowStyle', 'Hidden',
+>         '-NoProfile',
+>         '-NonInteractive',
+>         '-EncodedCommand',
+>         this.encodePowerShellCommand(this.getWindowsSendInputScript('SelectAll')),
+>       ],
+>       5000,
+>     )
+>       .then(() => undefined)
+>       .catch(() => this.runWindowsSendKeysSelectAll());
+>   }
+> 
+>   private runWindowsSendKeysSelectAll(): Promise<void> {
+>     return this.runCommand(
+>       'powershell',
+>       [
+>         '-WindowStyle', 'Hidden',
+>         '-NoProfile',
+>         '-NonInteractive',
+>         '-EncodedCommand',
+>         this.encodePowerShellCommand('Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("^a")')
+>       ],
+>       5000,
+>     ).then(() => undefined).catch(result => {
+>       throw new Error(`Windows select-all failed. SendInput and SendKeys both failed: ${result.stderr}`);
+>     });
+>   }
+> 
+298c436,453
+<   private getWindowsSendInputScript(mode: 'TypeText' | 'Paste'): string {
+---
+>   private runWindowsUIAutomationInsertText(text: string): Promise<void> {
+>     return this.runCommand(
+>       'powershell',
+>       [
+>         '-WindowStyle', 'Hidden',
+>         '-NoProfile',
+>         '-NonInteractive',
+>         '-EncodedCommand',
+>         this.encodePowerShellCommand(this.getWindowsUIAutomationInsertTextScript()),
+>       ],
+>       10000,
+>       { CLIPSYNC_REMOTE_TEXT: text },
+>     ).then(() => undefined).catch(result => {
+>       throw new Error(`Windows UI Automation caret insert failed: ${result.stderr}`);
+>     });
+>   }
+> 
+>   private getWindowsSendInputScript(mode: 'TypeText' | 'Paste' | 'SelectAll'): string {
+301c456,458
+<       : '[NativeInput]::Paste()';
+---
+>       : mode === 'Paste' 
+>         ? '[NativeInput]::Paste()' 
+>         : '[NativeInput]::SelectAll()';
+367a525,526
+>   static Random rnd = new Random();
+> 
+392a552
+>     Thread.Sleep(rnd.Next(15, 30)); // Small hardware-like delay between key down and up
+407a568,574
+>   public static void SelectAll() {
+>     IntPtr layout = GetKeyboardLayout(0);
+>     SetModifier(0x11, true, layout);
+>     TapScan((ushort)MapVirtualKeyEx(0x41, MAPVK_VK_TO_VSC, layout), false);
+>     SetModifier(0x11, false, layout);
+>   }
+> 
+413a581
+>         Thread.Sleep(rnd.Next(15, 30));
+431c599,600
+<       Thread.Sleep(20);
+---
+>       // Add a slightly random human-like delay between 15ms and 45ms to avoid simple anti-cheat detection
+>       Thread.Sleep(rnd.Next(15, 45));
+449,452c618
+<   if ($null -eq $element) {
+<     return $false
+<   }
+< 
+---
+>   if ($null -eq $element) { return $false }
+455,459c621,623
+<     $valuePattern = [System.Windows.Automation.ValuePattern]$pattern
+<     if ($valuePattern.Current.IsReadOnly) {
+<       throw "Focused control exposes ValuePattern but is read-only."
+<     }
+<     $valuePattern.SetValue($value)
+---
+>     $vp = [System.Windows.Automation.ValuePattern]$pattern
+>     if ($vp.Current.IsReadOnly) { throw "Focused control is read-only." }
+>     $vp.SetValue($value)
+473,475c637
+< if ($null -eq $focused) {
+<   throw "No focused UI Automation element was found."
+< }
+---
+> if ($null -eq $focused) { throw "No focused UI Automation element found." }
+480c642,708
+<   if (Try-SetAutomationValue $current $text) {
+---
+>   if (Try-SetAutomationValue $current $text) { exit 0 }
+>   $current = $walker.GetParent($current)
+> }
+> 
+> throw "UIA_VALUEPAT_NOTFOUND"
+>     `;
+>   }
+> 
+>   private getWindowsUIAutomationInsertTextScript(): string {
+>     return `
+> Add-Type -AssemblyName UIAutomationClient
+> Add-Type -AssemblyName UIAutomationTypes
+> Add-Type -TypeDefinition @'
+> using System;
+> using System.Runtime.InteropServices;
+> using System.Text;
+> 
+> public static class NativeInsert {
+>   [StructLayout(LayoutKind.Sequential)]
+>   struct RECT { public int Left, Top, Right, Bottom; }
+> 
+>   // EM_REPLACESEL: tells any Win32 Edit/RichEdit control to replace the current
+>   // selection (or insert at caret if nothing selected) with the given text.
+>   // The OS handles all caret math internally — zero offset calculation needed.
+>   const uint EM_REPLACESEL     = 0x00C2;
+>   const uint EM_GETSEL         = 0x00B0;
+>   const uint WM_GETTEXTLENGTH  = 0x000E;
+> 
+>   [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+>   static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wP, string lP);
+> 
+>   [DllImport("user32.dll")]
+>   static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wP, IntPtr lP);
+> 
+>   // Tier 1: Use EM_REPLACESEL — perfect for Notepad, Win32 Edit, RichEdit.
+>   // Returns true if the control is a real Edit (responds to EM_GETSEL).
+>   public static bool TryEmReplaceSel(IntPtr hwnd, string text) {
+>     if (hwnd == IntPtr.Zero) return false;
+>     // Probe: is this a real Edit control? EM_GETSEL returns 0 for non-Edit HWNDs.
+>     int lenBefore = (int)SendMessage(hwnd, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
+>     IntPtr r = SendMessage(hwnd, EM_GETSEL, IntPtr.Zero, IntPtr.Zero);
+>     long v = r.ToInt64();
+>     int selStart = (int)(v & 0xFFFF);
+>     int selEnd   = (int)((v >> 16) & 0xFFFF);
+>     // If both are 0 and there IS text, it is likely not a real Edit control.
+>     if (selStart == 0 && selEnd == 0 && lenBefore > 0) return false;
+>     // Looks like a real Edit. Use EM_REPLACESEL with fCanUndo=TRUE (wParam=1).
+>     SendMessage(hwnd, EM_REPLACESEL, new IntPtr(1), text);
+>     // Verify the text length actually changed.
+>     int lenAfter = (int)SendMessage(hwnd, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
+>     return lenAfter != lenBefore || text.Length == 0;
+>   }
+> }
+> '@
+> 
+> $insertText = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
+> if ($null -eq $insertText) { $insertText = '' }
+> 
+> $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+> if ($null -eq $focused) { throw 'INSERT_NEEDS_TYPING_FALLBACK' }
+> 
+> $focusedHwnd = [System.IntPtr]::new([long]$focused.Current.NativeWindowHandle)
+> 
+> # ── Tier 1: EM_REPLACESEL (Notepad, Win32 Edit, RichEdit) ─────────────────────
+> # The OS handles caret positioning internally. No offset math needed.
+> if ($focusedHwnd -ne [System.IntPtr]::Zero) {
+>   if ([NativeInsert]::TryEmReplaceSel($focusedHwnd, $insertText)) {
+483d710
+<   $current = $walker.GetParent($current)
+486c713,817
+< throw "Focused element and nearby parents do not expose ValuePattern or LegacyIAccessiblePattern."
+---
+> # ── Tier 2: UIA GetSelection + ValuePattern (WPF, UWP, some Chromium) ─────────
+> # Key fix: normalize BOTH the ValuePattern text AND the GetSelection offset to
+> # the same line-ending convention before doing substring math.
+> function Try-UiaInsert($element) {
+>   # Find ValuePattern or LegacyIAccessiblePattern on this element or a parent
+>   $vpat = $null
+>   $legacyPat = $null
+>   $vpElement = $null
+>   $isLegacy = $false
+>   $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+>   $cur = $element
+>   for ($i = 0; $i -lt 6 -and $null -ne $cur; $i++) {
+>     if ($cur.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vpat)) {
+>       $vp = [System.Windows.Automation.ValuePattern]$vpat
+>       if (-not $vp.Current.IsReadOnly) { $vpElement = $cur; break }
+>     }
+>     if ($cur.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPat)) {
+>       $vpElement = $cur; $isLegacy = $true; break
+>     }
+>     $cur = $walker.GetParent($cur)
+>   }
+>   if ($null -eq $vpElement) { return $false }
+> 
+>   # Find TextPattern to get selection/caret
+>   $tpat = $null
+>   $tpElement = $null
+>   $cur = $element
+>   for ($i = 0; $i -lt 6 -and $null -ne $cur; $i++) {
+>     if ($cur.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tpat)) {
+>       $tpElement = $cur; break
+>     }
+>     $cur = $walker.GetParent($cur)
+>   }
+>   if ($null -eq $tpElement) { return $false }
+> 
+>   $tp = [System.Windows.Automation.TextPattern]$tpat
+> 
+>   # Get selection ranges
+>   try {
+>     $ranges = $tp.GetSelection()
+>     if ($null -eq $ranges -or $ranges.Length -eq 0) { return $false }
+>   } catch { return $false }
+> 
+>   $selRange = $ranges[0]
+> 
+>   # Get the text BEFORE the selection start by cloning DocumentRange and
+>   # moving its End endpoint to the selection Start.
+>   $doc = $tp.DocumentRange
+>   $beforeRange = $doc.Clone()
+>   $null = $beforeRange.MoveEndpointByRange(
+>     [System.Windows.Automation.TextPatternRangeEndpoint]::End,
+>     $selRange,
+>     [System.Windows.Automation.TextPatternRangeEndpoint]::Start)
+>   $beforeText = $beforeRange.GetText(-1)
+> 
+>   # Get the selected text
+>   $selText = $selRange.GetText(-1)
+> 
+>   # Get the full document text from TextPattern (NOT from ValuePattern)
+>   # to ensure line endings are consistent for offset calculation.
+>   $docText = $doc.GetText(-1)
+> 
+>   # Normalize all texts to LF so offset math is consistent
+>   $crlf = ([char]13).ToString() + ([char]10).ToString()
+>   $lf = ([char]10).ToString()
+>   $beforeNorm = $beforeText.Replace($crlf, $lf)
+>   $selNorm    = $selText.Replace($crlf, $lf)
+>   $docNorm    = $docText.Replace($crlf, $lf)
+> 
+>   $s = $beforeNorm.Length
+>   $e = $s + $selNorm.Length
+> 
+>   # Clamp to document bounds
+>   if ($s -gt $docNorm.Length) { $s = $docNorm.Length }
+>   if ($e -gt $docNorm.Length) { $e = $docNorm.Length }
+>   if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
+> 
+>   # Build the new value from the normalized document text
+>   $newVal = $docNorm.Substring(0, $s) + $insertText + $docNorm.Substring($e)
+> 
+>   # Now get the original value to check if IT uses CRLF.
+>   # If it does, convert our result to match.
+>   $vpVal = ""
+>   if ($isLegacy) {
+>     $vpVal = [string]([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPat).Current.Value
+>   } else {
+>     $vpVal = [string]([System.Windows.Automation.ValuePattern]$vpat).Current.Value
+>   }
+> 
+>   if ($vpVal.Contains($crlf)) {
+>     $newVal = $newVal.Replace($lf, $crlf)
+>   }
+> 
+>   if ($isLegacy) {
+>     ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPat).SetValue($newVal)
+>   } else {
+>     ([System.Windows.Automation.ValuePattern]$vpat).SetValue($newVal)
+>   }
+>   return $true
+> }
+> 
+> if (Try-UiaInsert $focused) { exit 0 }
+> 
+> # ── No UIA strategy worked — signal Node.js to use SendInput typing ───────────
+> throw 'INSERT_NEEDS_TYPING_FALLBACK'
