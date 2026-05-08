@@ -84,7 +84,7 @@ export class PasteSimulator {
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`\n[PasteSimulator Error] Failed to insert focused text:\n  -> ${message}`);
+      console.error(`\n[PasteSimulator Error] All insert strategies failed:\n  -> ${message}`);
       return false;
     }
   }
@@ -136,36 +136,44 @@ export class PasteSimulator {
 
   private async insertFocusedTextControl(text: string): Promise<void> {
     if (this.platform === 'win32') {
+      // Tier 1 & 2 are handled inside the PowerShell script.
+      // Exit code 0 = success (EM_REPLACESEL or UIA insert worked).
+      // Exit code 10 = no native Edit and no UIA caret — need typing fallback.
+      // Any other error = unexpected failure.
       try {
         await this.runWindowsUIAutomationInsertText(text);
+        // Tier 1 or 2 succeeded
+        return;
       } catch (err) {
-        if (String(err).includes('UIAutomation_End_Fallback')) {
-          console.log(`[PasteSimulator] App does not expose Caret via UIA. Falling back to native system Paste (Ctrl+V)...`);
-          
+        const msg = String(err);
+
+        if (msg.includes('INSERT_NEEDS_TYPING_FALLBACK')) {
+          // Tier 3: Type characters via SendInput — types at the real OS caret
+          console.log('[PasteSimulator] UIA caret not available. Falling back to SendInput typing at active cursor...');
           try {
-            // Backup current clipboard
-            const oldClip = await clipboard.read().catch(() => '');
-            
-            // Set text to clipboard
-            await clipboard.write(text);
-            
-            // Simulate Ctrl+V to paste the text directly at the active cursor
-            await this.simulateKeystroke();
-            
-            // Optional: small delay, then restore
-            await this.sleep(100);
-            if (oldClip) {
-              await clipboard.write(oldClip);
-            }
-          } catch (pasteErr) {
-            console.error(`[PasteSimulator] Failed fallback paste execution:`, pasteErr);
+            await this.runWindowsSendInputText(text);
+            console.log('[PasteSimulator] Text typed successfully via SendInput.');
+            return;
+          } catch {
+            console.log('[PasteSimulator] SendInput typing failed. Falling back to clipboard paste...');
           }
-          
-          return;
+
+          // Tier 4: Clipboard + Ctrl+V — last resort
+          try {
+            const oldClip = await clipboard.read().catch(() => '');
+            await clipboard.write(text);
+            await this.simulateKeystroke();
+            await this.sleep(150);
+            if (oldClip) await clipboard.write(oldClip);
+            console.log('[PasteSimulator] Text pasted via clipboard Ctrl+V fallback.');
+            return;
+          } catch (pasteErr) {
+            console.error('[PasteSimulator] All fallback strategies failed:', pasteErr);
+          }
         }
+
         throw err;
       }
-      return;
     }
 
     return Promise.reject(new Error(`Focused text insertion is currently implemented only on Windows UI Automation.`));
@@ -557,170 +565,156 @@ throw "UIA_VALUEPAT_NOTFOUND"
     return `
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName WindowsBase
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public struct NativePoint {
-  public int X;
-  public int Y;
-}
-
-public static class NativeCaret {
+public static class NativeInsert {
   [StructLayout(LayoutKind.Sequential)]
   struct RECT { public int Left, Top, Right, Bottom; }
 
-  [StructLayout(LayoutKind.Sequential)]
-  struct GUITHREADINFO {
-    public int cbSize, flags;
-    public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
-    public RECT rcCaret;
-  }
+  // EM_REPLACESEL: tells any Win32 Edit/RichEdit control to replace the current
+  // selection (or insert at caret if nothing selected) with the given text.
+  // The OS handles all caret math internally — zero offset calculation needed.
+  const uint EM_REPLACESEL     = 0x00C2;
+  const uint EM_GETSEL         = 0x00B0;
+  const uint WM_GETTEXTLENGTH  = 0x000E;
 
-  const uint EM_GETSEL        = 0x00B0;
-  const uint WM_GETTEXTLENGTH = 0x000E;
-  const uint WM_GETTEXT       = 0x000D;
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+  static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wP, string lP);
 
-  [DllImport("user32.dll")] static extern bool    GetGUIThreadInfo(uint id, ref GUITHREADINFO i);
-  [DllImport("user32.dll")] static extern bool    ClientToScreen(IntPtr hWnd, ref NativePoint p);
-  [DllImport("user32.dll")] static extern uint    GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
-  [DllImport("user32.dll")] static extern IntPtr  SendMessage(IntPtr hWnd, uint msg, IntPtr wP, IntPtr lP);
-  [DllImport("user32.dll")] static extern IntPtr  SendMessage(IntPtr hWnd, uint msg, IntPtr wP, StringBuilder lP);
+  [DllImport("user32.dll")]
+  static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wP, IntPtr lP);
 
-  // Try EM_GETSEL to get caret offset — works for any Win32 EDIT or RichEdit control.
-  public static bool TryEmGetSel(IntPtr hwnd, out int selStart, out int selEnd) {
-    selStart = selEnd = -1;
+  // Tier 1: Use EM_REPLACESEL — perfect for Notepad, Win32 Edit, RichEdit.
+  // Returns true if the control is a real Edit (responds to EM_GETSEL).
+  public static bool TryEmReplaceSel(IntPtr hwnd, string text) {
     if (hwnd == IntPtr.Zero) return false;
+    // Probe: is this a real Edit control? EM_GETSEL returns 0 for non-Edit HWNDs.
+    int lenBefore = (int)SendMessage(hwnd, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
     IntPtr r = SendMessage(hwnd, EM_GETSEL, IntPtr.Zero, IntPtr.Zero);
     long v = r.ToInt64();
-    selStart = (int)(v & 0xFFFF);
-    selEnd   = (int)((v >> 16) & 0xFFFF);
-    return selStart >= 0 && selEnd >= selStart;
-  }
-
-  // Read control text via WM_GETTEXT — works for standard EDIT/RichEdit.
-  public static bool TryWmGetText(IntPtr hwnd, out string text) {
-    text = "";
-    if (hwnd == IntPtr.Zero) return false;
-    int len = (int)SendMessage(hwnd, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
-    if (len < 0) return false;
-    if (len == 0) return true;  // empty string is valid
-    var sb = new StringBuilder(len + 2);
-    SendMessage(hwnd, WM_GETTEXT, new IntPtr(len + 1), sb);
-    text = sb.ToString();
-    return true;
-  }
-
-  // Try GetGUIThreadInfo using the element's own HWND thread (more accurate than foreground window).
-  public static bool TryGetCaretPoint(IntPtr elementHwnd, out NativePoint point) {
-    point = new NativePoint();
-    if (elementHwnd == IntPtr.Zero) return false;
-    uint pid;
-    uint tid = GetWindowThreadProcessId(elementHwnd, out pid);
-    if (tid == 0) return false;
-    var info = new GUITHREADINFO();
-    info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
-    if (!GetGUIThreadInfo(tid, ref info) || info.hwndCaret == IntPtr.Zero) return false;
-    point.X = info.rcCaret.Left + 1;
-    point.Y = info.rcCaret.Top + Math.Max(0, (info.rcCaret.Bottom - info.rcCaret.Top) / 2);
-    return ClientToScreen(info.hwndCaret, ref point);
+    int selStart = (int)(v & 0xFFFF);
+    int selEnd   = (int)((v >> 16) & 0xFFFF);
+    // If both are 0 and there IS text, it is likely not a real Edit control.
+    if (selStart == 0 && selEnd == 0 && lenBefore > 0) return false;
+    // Looks like a real Edit. Use EM_REPLACESEL with fCanUndo=TRUE (wParam=1).
+    SendMessage(hwnd, EM_REPLACESEL, new IntPtr(1), text);
+    // Verify the text length actually changed.
+    int lenAfter = (int)SendMessage(hwnd, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
+    return lenAfter != lenBefore || text.Length == 0;
   }
 }
 '@
 
 $insertText = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
+if ($null -eq $insertText) { $insertText = '' }
 
 $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-if ($null -eq $focused) { throw "UIAutomation_End_Fallback" }
+if ($null -eq $focused) { throw 'INSERT_NEEDS_TYPING_FALLBACK' }
 
 $focusedHwnd = [System.IntPtr]::new([long]$focused.Current.NativeWindowHandle)
 
-# ── Strategy 1: EM_GETSEL + WM_GETTEXT (fastest, works for any Win32 EDIT/RichEdit) ──────────
-$emStart = -1; $emEnd = -1
-if ([NativeCaret]::TryEmGetSel($focusedHwnd, [ref]$emStart, [ref]$emEnd)) {
-  $windowText = ""
-  if ([NativeCaret]::TryWmGetText($focusedHwnd, [ref]$windowText)) {
-    $s = [Math]::Max(0, [Math]::Min($emStart, $windowText.Length))
-    $e = [Math]::Max(0, [Math]::Min($emEnd,   $windowText.Length))
-    if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
-    $newText = $windowText.Substring(0, $s) + $insertText + $windowText.Substring($e)
-
-    $vpat = $null
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-    $cur = $focused
-    for ($i = 0; $i -lt 6 -and $null -ne $cur; $i++) {
-      if ($cur.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vpat)) {
-        $vp = [System.Windows.Automation.ValuePattern]$vpat
-        if (-not $vp.Current.IsReadOnly) { $vp.SetValue($newText); exit 0 }
-      }
-      $cur = $walker.GetParent($cur)
-    }
+# ── Tier 1: EM_REPLACESEL (Notepad, Win32 Edit, RichEdit) ─────────────────────
+# The OS handles caret positioning internally. No offset math needed.
+if ($focusedHwnd -ne [System.IntPtr]::Zero) {
+  if ([NativeInsert]::TryEmReplaceSel($focusedHwnd, $insertText)) {
+    exit 0
   }
 }
 
-# ── Strategy 2: UIA TextPattern + ValuePattern (works for Electron, WPF, etc.) ──────────────
-function Get-OffsetsFromRange($tp, $range) {
-  $doc = $tp.DocumentRange; $before = $doc.Clone()
-  $null = $before.MoveEndpointByRange(
-    [System.Windows.Automation.TextPatternRangeEndpoint]::End, $range,
-    [System.Windows.Automation.TextPatternRangeEndpoint]::Start)
-  $sel = $range.GetText(-1)
-  return @{ Start = $before.GetText(-1).Length; End = ($before.GetText(-1).Length + $sel.Length) }
-}
+# ── Tier 2: UIA GetSelection + ValuePattern (WPF, UWP, some Chromium) ─────────
+# Key fix: normalize BOTH the ValuePattern text AND the GetSelection offset to
+# the same line-ending convention before doing substring math.
+function Try-UiaInsert($element) {
+  # Find ValuePattern on this element or a parent
+  $vpat = $null
+  $vpElement = $null
+  $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+  $cur = $element
+  for ($i = 0; $i -lt 6 -and $null -ne $cur; $i++) {
+    if ($cur.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vpat)) {
+      $vp = [System.Windows.Automation.ValuePattern]$vpat
+      if (-not $vp.Current.IsReadOnly) { $vpElement = $cur; break }
+    }
+    $cur = $walker.GetParent($cur)
+  }
+  if ($null -eq $vpElement) { return $false }
 
-function Try-GetCaret($element, $valueLen) {
+  # Find TextPattern to get selection/caret
   $tpat = $null
-  if (-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tpat)) { return $null }
+  $tpElement = $null
+  $cur = $element
+  for ($i = 0; $i -lt 6 -and $null -ne $cur; $i++) {
+    if ($cur.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$tpat)) {
+      $tpElement = $cur; break
+    }
+    $cur = $walker.GetParent($cur)
+  }
+  if ($null -eq $tpElement) { return $false }
+
   $tp = [System.Windows.Automation.TextPattern]$tpat
 
-  $cp = New-Object NativePoint
-  if ([NativeCaret]::TryGetCaretPoint($focusedHwnd, [ref]$cp)) {
-    try {
-      $pt = New-Object System.Windows.Point([double]$cp.X, [double]$cp.Y)
-      return Get-OffsetsFromRange $tp ($tp.RangeFromPoint($pt))
-    } catch {}
-  }
-
+  # Get selection ranges
   try {
     $ranges = $tp.GetSelection()
-    if ($ranges -and $ranges.Length -gt 0) {
-      $off = Get-OffsetsFromRange $tp $ranges[0]
-      if ($off.Start -eq $valueLen -and $off.End -eq $valueLen -and $valueLen -gt 0) { return $null }
-      return $off
-    }
-  } catch {}
-  return $null
-}
+    if ($null -eq $ranges -or $ranges.Length -eq 0) { return $false }
+  } catch { return $false }
 
-$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-$current = $focused
-for ($i = 0; $i -lt 6 -and $null -ne $current; $i++) {
-  $vpat2 = $null
-  if ($current.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vpat2)) {
-    $vp2 = [System.Windows.Automation.ValuePattern]$vpat2
-    if (-not $vp2.Current.IsReadOnly) {
-      $val = [string]$vp2.Current.Value
-      $off = Try-GetCaret $focused $val.Length
-      if ($null -eq $off -and $current -ne $focused) { $off = Try-GetCaret $current $val.Length }
-      if ($null -ne $off) {
-        $s = [Math]::Max(0, [Math]::Min([int]$off.Start, $val.Length))
-        $e = [Math]::Max(0, [Math]::Min([int]$off.End,   $val.Length))
-        if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
-        $vp2.SetValue($val.Substring(0, $s) + $insertText + $val.Substring($e))
-        exit 0
-      }
-      # JUGAAD: caret unknown but ValuePattern works — append at end so content always lands in the field
-      $vp2.SetValue($val + $insertText)
-      exit 0
-    }
+  $selRange = $ranges[0]
+
+  # Get the text BEFORE the selection start by cloning DocumentRange and
+  # moving its End endpoint to the selection Start.
+  $doc = $tp.DocumentRange
+  $beforeRange = $doc.Clone()
+  $null = $beforeRange.MoveEndpointByRange(
+    [System.Windows.Automation.TextPatternRangeEndpoint]::End,
+    $selRange,
+    [System.Windows.Automation.TextPatternRangeEndpoint]::Start)
+  $beforeText = $beforeRange.GetText(-1)
+
+  # Get the selected text
+  $selText = $selRange.GetText(-1)
+
+  # Get the full document text from TextPattern (NOT from ValuePattern)
+  # to ensure line endings are consistent for offset calculation.
+  $docText = $doc.GetText(-1)
+
+  # Normalize all texts to LF so offset math is consistent
+  $crlf = ([char]13).ToString() + ([char]10).ToString()
+  $lf = ([char]10).ToString()
+  $beforeNorm = $beforeText.Replace($crlf, $lf)
+  $selNorm    = $selText.Replace($crlf, $lf)
+  $docNorm    = $docText.Replace($crlf, $lf)
+
+  $s = $beforeNorm.Length
+  $e = $s + $selNorm.Length
+
+  # Clamp to document bounds
+  if ($s -gt $docNorm.Length) { $s = $docNorm.Length }
+  if ($e -gt $docNorm.Length) { $e = $docNorm.Length }
+  if ($e -lt $s) { $tmp = $s; $s = $e; $e = $tmp }
+
+  # Build the new value from the normalized document text
+  $newVal = $docNorm.Substring(0, $s) + $insertText + $docNorm.Substring($e)
+
+  # Now get the ValuePattern value to check if IT uses CRLF.
+  # If it does, convert our result to match.
+  $vp = [System.Windows.Automation.ValuePattern]$vpat
+  $vpVal = [string]$vp.Current.Value
+  if ($vpVal.Contains($crlf)) {
+    $newVal = $newVal.Replace($lf, $crlf)
   }
-  $current = $walker.GetParent($current)
+
+  $vp.SetValue($newVal)
+  return $true
 }
 
-# JUGAAD fallback: no ValuePattern found anywhere — signal Node for Ctrl+V
-throw "UIAutomation_End_Fallback"
+if (Try-UiaInsert $focused) { exit 0 }
+
+# ── No UIA strategy worked — signal Node.js to use SendInput typing ───────────
+throw 'INSERT_NEEDS_TYPING_FALLBACK'
     `;
   }
 

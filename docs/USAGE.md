@@ -138,15 +138,12 @@ Because `SetValue` sets the whole value, `.set` and `.setclip` replace the full 
 .insertclip
 ```
 
-On Windows, this also uses UI Automation, but it tries to preserve the current contents:
+On Windows, this uses a 4-tier fallback hierarchy to insert at the caret:
 
-1. Get the focused UI Automation element.
-2. Read the current value through `ValuePattern` or `LegacyIAccessiblePattern`.
-3. Read the real system caret location with `GetGUIThreadInfo`.
-4. Convert that caret point to a UI Automation text range with `TextPattern.RangeFromPoint`.
-5. Fall back to `TextPattern.GetSelection` only when the caret point is not available.
-6. Build `before + inserted text + after`.
-7. Set the rebuilt value back into the control.
+1. **EM_REPLACESEL** — Send a native Win32 message that tells the Edit control to insert text at the current caret. The OS handles all caret math. Works perfectly in Notepad, RichEdit, and all standard Win32 text controls.
+2. **UIA GetSelection + SetValue** — Use UI Automation `TextPattern.GetSelection()` to find the caret offset, then reconstruct the value with the text inserted at that offset. Line endings are normalized to prevent CRLF/LF offset mismatches. Works in WPF and some UWP/Chromium apps.
+3. **SendInput typing** — Type each character via `SendInput` keystrokes at the real OS caret. Works in Electron apps (VS Code, Discord, Slack) and most other apps.
+4. **Clipboard + Ctrl+V** — Last resort: set the clipboard and send Ctrl+V.
 
 Use `.insertclip` when you want paste-like behavior but `.type` or normal paste is blocked.
 
@@ -156,13 +153,16 @@ Use `.insertclip` when you want paste-like behavior but `.type` or normal paste 
 
 That is expected. `.setclip` means "set the whole focused value." Use `.insertclip` to insert at the cursor.
 
-### `.insertclip` Typing Fallback
+### `.insertclip` Fallback Behavior
 
-If `.insertclip` cannot perfectly locate the caret through UI Automation (like in Electron apps: Discord, VS Code, Slack etc), it will now automatically fall back to typing the text using keystrokes. This ensures your text still lands right at your actual cursor location, rather than appending everything to the very end of the field.
+If `.insertclip` cannot insert via native Win32 Edit messages or UI Automation caret detection, it automatically falls back to typing the text via `SendInput` keystrokes. This ensures your text lands right at your actual cursor position. If keystroke typing is also rejected by the app, it will fall back to clipboard paste (Ctrl+V) as a last resort.
 
 ### Cannot Find The Cursor?
 
-Some controls expose a settable value but do not expose reliable caret information *and* block keystrokes. In that case, use `.setclip` to replace the whole field.
+Some controls do not expose reliable caret information through any method. In that case:
+- The app will automatically try typing the text via `SendInput` (like `.type`)
+- If typing is also rejected, it uses clipboard paste (Ctrl+V)
+- If the target app blocks both, use `.setclip` to replace the whole field
 
 ### `.set` Sends One Long Line
 
