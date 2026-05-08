@@ -156,32 +156,36 @@ export class PasteSimulator {
         const errorMsg = String(err);
         if (errorMsg.includes('UIAutomation_End_Fallback')) {
           console.log(`[PasteSimulator] UIA insertion not available or unreliable.`);
-          console.log(`[PasteSimulator] Attempting character-by-character typing (Monaco/CodeMirror compatible)...`);
+          console.log(`[PasteSimulator] Attempting HID-level keyboard injection (hardware-like input)...`);
           
           try {
-            // For browser-based editors (Monaco, CodeMirror), character-by-character typing
-            // is the ONLY reliable method because:
-            // 1. Paste events get intercepted by JavaScript
-            // 2. Synthetic Ctrl+V is not trusted by editor frameworks
-            // 3. Character events bypass paste handlers and go directly to editor model
-            await this.simulateTyping(text);
-            console.log('[PasteSimulator] Character-by-character typing completed successfully.');
-          } catch (typeErr) {
-            console.error(`[PasteSimulator] Character typing failed:`, typeErr);
+            // Try HID-level injection first (most reliable for protected editors)
+            await this.runWindowsHIDInjection(text);
+            console.log('[PasteSimulator] HID-level injection completed successfully.');
+          } catch (hidErr) {
+            console.log(`[PasteSimulator] HID injection not available, falling back to SendInput typing...`);
             
-            // Final fallback: try clipboard paste anyway (may work in some apps)
-            console.log(`[PasteSimulator] Falling back to clipboard paste as last resort...`);
             try {
-              const oldClip = await clipboard.read().catch(() => '');
-              await clipboard.write(text);
-              await this.sleep(50);
-              await this.simulateKeystroke();
-              await this.sleep(100);
-              if (oldClip) await clipboard.write(oldClip);
-              console.log('[PasteSimulator] Clipboard fallback completed.');
-            } catch (pasteErr) {
-              console.error(`[PasteSimulator] All insertion methods failed:`, pasteErr);
-              throw pasteErr;
+              // Fallback to SendInput character typing
+              await this.simulateTyping(text);
+              console.log('[PasteSimulator] Character-by-character typing completed successfully.');
+            } catch (typeErr) {
+              console.error(`[PasteSimulator] Character typing failed:`, typeErr);
+              
+              // Final fallback: clipboard paste
+              console.log(`[PasteSimulator] Falling back to clipboard paste as last resort...`);
+              try {
+                const oldClip = await clipboard.read().catch(() => '');
+                await clipboard.write(text);
+                await this.sleep(50);
+                await this.simulateKeystroke();
+                await this.sleep(100);
+                if (oldClip) await clipboard.write(oldClip);
+                console.log('[PasteSimulator] Clipboard fallback completed.');
+              } catch (pasteErr) {
+                console.error(`[PasteSimulator] All insertion methods failed:`, pasteErr);
+                throw pasteErr;
+              }
             }
           }
           
@@ -278,6 +282,127 @@ Since you are on Linux, you need to install a utility to simulate keystrokes.
         resolve(result);
       });
     });
+  }
+
+  private runWindowsHIDInjection(text: string): Promise<void> {
+    // This uses a more aggressive keyboard injection approach that mimics hardware input
+    // by using keybd_event (older but more trusted by some apps) or attempting to
+    // use the Interception driver if available
+    
+    const charCount = text.length;
+    const lineCount = (text.match(/\n/g) || []).length + 1;
+    const estimatedSeconds = Math.ceil(charCount * 0.025);
+    
+    if (charCount > 100) {
+      console.log(`[PasteSimulator] HID injection: ${charCount} characters (${lineCount} lines), estimated ${estimatedSeconds}s...`);
+    }
+    
+    const timeout = Math.max(10000, Math.min(charCount * 25 + 2000, 300000));
+    
+    return this.runCommand(
+      'powershell',
+      [
+        '-WindowStyle', 'Hidden',
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        this.encodePowerShellCommand(this.getWindowsHIDInjectionScript()),
+      ],
+      timeout,
+      { CLIPSYNC_REMOTE_TEXT: text },
+    ).then(() => undefined);
+  }
+
+  private getWindowsHIDInjectionScript(): string {
+    return `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+public static class HIDInput {
+  // Use keybd_event instead of SendInput - older API but more trusted by some apps
+  [DllImport("user32.dll")]
+  static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  
+  [DllImport("user32.dll")]
+  static extern short VkKeyScanEx(char ch, IntPtr dwhkl);
+  
+  [DllImport("user32.dll")]
+  static extern IntPtr GetKeyboardLayout(uint idThread);
+  
+  [DllImport("user32.dll")]
+  static extern byte MapVirtualKey(uint uCode, uint uMapType);
+  
+  const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+  const uint KEYEVENTF_KEYUP = 0x0002;
+  const uint MAPVK_VK_TO_VSC = 0;
+  
+  static void PressKey(byte vk, bool extended = false) {
+    byte scan = MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+    uint flags = extended ? KEYEVENTF_EXTENDEDKEY : 0;
+    keybd_event(vk, scan, flags, UIntPtr.Zero);
+    keybd_event(vk, scan, flags | KEYEVENTF_KEYUP, UIntPtr.Zero);
+  }
+  
+  static void PressKeyWithModifier(byte vk, bool shift, bool ctrl, bool alt) {
+    if (shift) keybd_event(0x10, 0, 0, UIntPtr.Zero);
+    if (ctrl) keybd_event(0x11, 0, 0, UIntPtr.Zero);
+    if (alt) keybd_event(0x12, 0, 0, UIntPtr.Zero);
+    
+    PressKey(vk);
+    
+    if (alt) keybd_event(0x12, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+    if (ctrl) keybd_event(0x11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+    if (shift) keybd_event(0x10, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+  }
+  
+  public static void TypeText(string text) {
+    IntPtr layout = GetKeyboardLayout(0);
+    Random rnd = new Random();
+    
+    foreach (char ch in text) {
+      // Handle newlines
+      if (ch == '\\n') {
+        PressKey(0x0D); // Enter
+        Thread.Sleep(rnd.Next(30, 50));
+        continue;
+      }
+      
+      if (ch == '\\r') continue;
+      
+      // Handle tabs
+      if (ch == '\\t') {
+        PressKey(0x09); // Tab
+        Thread.Sleep(rnd.Next(20, 35));
+        continue;
+      }
+      
+      short packed = VkKeyScanEx(ch, layout);
+      if (packed == -1) {
+        // Character not in layout - skip or use Alt+numpad (complex)
+        continue;
+      }
+      
+      byte vk = (byte)(packed & 0xff);
+      byte shiftState = (byte)((packed >> 8) & 0xff);
+      bool shift = (shiftState & 1) != 0;
+      bool ctrl = (shiftState & 2) != 0;
+      bool alt = (shiftState & 4) != 0;
+      
+      PressKeyWithModifier(vk, shift, ctrl, alt);
+      
+      // Human-like timing with randomization
+      Thread.Sleep(rnd.Next(18, 28));
+    }
+  }
+}
+'@
+
+$text = [Environment]::GetEnvironmentVariable('CLIPSYNC_REMOTE_TEXT', 'Process')
+Start-Sleep -Milliseconds 200
+[HIDInput]::TypeText($text)
+    `;
   }
 
   private runWindowsSendInputText(text: string): Promise<void> {
