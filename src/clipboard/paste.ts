@@ -623,6 +623,13 @@ function Try-SetAutomationValue($element, $value) {
     $vp.SetValue($value)
     return $true
   }
+
+  $legacyPattern = $null
+  if ($element.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPattern)) {
+    ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPattern).SetValue($value)
+    return $true
+  }
+
   return $false
 }
 
@@ -715,15 +722,20 @@ if ($focusedHwnd -ne [System.IntPtr]::Zero) {
 # Key fix: normalize BOTH the ValuePattern text AND the GetSelection offset to
 # the same line-ending convention before doing substring math.
 function Try-UiaInsert($element) {
-  # Find ValuePattern on this element or a parent
+  # Find ValuePattern or LegacyIAccessiblePattern on this element or a parent
   $vpat = $null
+  $legacyPat = $null
   $vpElement = $null
+  $isLegacy = $false
   $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
   $cur = $element
   for ($i = 0; $i -lt 6 -and $null -ne $cur; $i++) {
     if ($cur.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vpat)) {
       $vp = [System.Windows.Automation.ValuePattern]$vpat
       if (-not $vp.Current.IsReadOnly) { $vpElement = $cur; break }
+    }
+    if ($cur.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern, [ref]$legacyPat)) {
+      $vpElement = $cur; $isLegacy = $true; break
     }
     $cur = $walker.GetParent($cur)
   }
@@ -786,15 +798,24 @@ function Try-UiaInsert($element) {
   # Build the new value from the normalized document text
   $newVal = $docNorm.Substring(0, $s) + $insertText + $docNorm.Substring($e)
 
-  # Now get the ValuePattern value to check if IT uses CRLF.
+  # Now get the original value to check if IT uses CRLF.
   # If it does, convert our result to match.
-  $vp = [System.Windows.Automation.ValuePattern]$vpat
-  $vpVal = [string]$vp.Current.Value
+  $vpVal = ""
+  if ($isLegacy) {
+    $vpVal = [string]([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPat).Current.Value
+  } else {
+    $vpVal = [string]([System.Windows.Automation.ValuePattern]$vpat).Current.Value
+  }
+
   if ($vpVal.Contains($crlf)) {
     $newVal = $newVal.Replace($lf, $crlf)
   }
 
-  $vp.SetValue($newVal)
+  if ($isLegacy) {
+    ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPat).SetValue($newVal)
+  } else {
+    ([System.Windows.Automation.ValuePattern]$vpat).SetValue($newVal)
+  }
   return $true
 }
 
